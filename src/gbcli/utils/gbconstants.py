@@ -150,8 +150,7 @@ ENVIRONMENT_CONFIGS = {
     "DEV": {
         "env": "DEV",
         "lakehouse_environment": "STAGING",
-        # "gbserver_host": "https://api.llm-build-dev.vpc-int.res.ibm.com",
-        "gbserver_host": "http://localhost:8081",
+        "gbserver_host": "https://api.llm-build-dev.vpc-int.res.ibm.com",
         "default_space": "public",
         "dmf_ui": "https://ui2.dmf-staging.vpc-int.res.ibm.com",
         "config_spaces": "dev.gb.spaces",

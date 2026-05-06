@@ -121,7 +121,7 @@ class ArtifactGraphRequest(BaseModel):
     artifact_url: Optional[str] = None
     artifact_type: Optional[str] = None
     max_depth: int = Field(default=10, ge=1, le=50)
-    direction: str = "downstream"
+    direction: str = "both"
 
 
 class LineageNodeRef(BaseModel):
