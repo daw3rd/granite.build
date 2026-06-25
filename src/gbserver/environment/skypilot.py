@@ -32,6 +32,7 @@ from gbserver.types.errors import WorkloadFailedException
 from gbserver.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from gbserver.monitoring.logfile_monitor import LogFileMonitor
     from gbserver.resilience.retry_handler import RetryStrategy
 
 logger = get_logger(__name__)
@@ -111,6 +112,11 @@ _TRANSIENT_PROVISION_SUBSTRINGS = (
     "in normal for",  # slurm partition acquisition failure tail
 )
 
+_NON_TRANSIENT_PROVISION_SUBSTRINGS = (
+    "catalog does not contain",  # no matching instance type exists — config error
+    "no launchable resource",  # similar permanent mismatch
+)
+
 
 def _is_transient_provision_error(exc: BaseException) -> bool:
     """Return True if exc is a retriable resource-acquisition/provision failure.
@@ -120,12 +126,19 @@ def _is_transient_provision_error(exc: BaseException) -> bool:
     Exception. Non-provision failures (auth, image-not-found, config, etc.)
     return False so they propagate without masking.
 
+    Permanent configuration errors (e.g. "Catalog does not contain any
+    instances") are excluded even when they raise ResourcesUnavailableError,
+    since retrying will never succeed.
+
     Args:
         exc: The exception raised by the provisioning step.
 
     Returns:
         bool: True if the failure looks transient and worth retrying.
     """
+    text = str(exc).lower()
+    if any(s in text for s in _NON_TRANSIENT_PROVISION_SUBSTRINGS):
+        return False
     if sky is not None:
         exc_types = tuple(
             t
@@ -138,8 +151,15 @@ def _is_transient_provision_error(exc: BaseException) -> bool:
         )
         if exc_types and isinstance(exc, exc_types):
             return True
-    text = str(exc).lower()
     return any(s in text for s in _TRANSIENT_PROVISION_SUBSTRINGS)
+
+
+from gbserver.environment._skypilot_ssh import (
+    execute_on_host_via_ssh as _execute_on_host_via_ssh,
+)
+from gbserver.environment._skypilot_ssh import (
+    extract_host_ssh_info as _extract_host_ssh_info,
+)
 
 
 class Skypilot(Environment):
@@ -348,6 +368,7 @@ class Skypilot(Environment):
                 "setup_config": kwargs.get("setup_config"),
                 "retry_enabled": kwargs.get("retry_enabled"),
                 "retry_transparently": kwargs.get("retry_transparently"),
+                "bindings": kwargs.get("bindings"),
             }
 
             launcher_config = kwargs.get("launcher_config", {}) or {}
@@ -385,14 +406,40 @@ class Skypilot(Environment):
                 infra = f"{infra}/{zone}" if infra else zone
                 zone = None
 
+            # Build cluster config overrides (docker run_options, etc.)
+            # SkyPilot's top-level `config:` section maps to
+            # _cluster_config_overrides on sky.Resources.
+            cluster_config_overrides = {}
+            docker_config = {
+                **launcher_config.get("docker", {}),
+                **config.get("launcher_config", {}).get("docker", {}),
+            }
+            if docker_config:
+                cluster_config_overrides["docker"] = docker_config
+
+            image_id = config.get("launcher_config", {}).get(
+                "image_id"
+            ) or launcher_config.get("image_id")
+
+            logger.info(
+                "SkyPilot resources: accelerators=%s, image_id=%s, "
+                "cluster_config_overrides=%s",
+                res_config.get("accelerators"),
+                image_id,
+                cluster_config_overrides or None,
+            )
+
             resources = sky.Resources(
                 infra=infra,
                 accelerators=res_config.get("accelerators"),
+                instance_type=res_config.get("instance_type"),
                 cpus=res_config.get("cpus"),
                 memory=res_config.get("memory"),
                 disk_size=res_config.get("disk_size"),
+                use_spot=res_config.get("use_spot"),
                 zone=zone,
-                image_id=launcher_config.get("image_id"),
+                image_id=image_id,
+                _cluster_config_overrides=cluster_config_overrides or None,
             )
 
             # Build environment variables
@@ -431,6 +478,38 @@ class Skypilot(Environment):
             if build_workdir:
                 env_vars["GB_BUILD_WORKDIR"] = build_workdir
 
+            # Inject inline hfpull downloads into setup from per-step bindings
+            setup_script = launcher_config.get("setup") or ""
+            pending_hfpulls = {}
+            for bid, bval in (kwargs.get("bindings") or {}).items():
+                if isinstance(bval, dict) and "_hfpull" in bval:
+                    pending_hfpulls[bid] = bval["_hfpull"]
+            if pending_hfpulls:
+                # Inject HF_TOKEN into env vars if any pull provides one
+                # (hf download picks it up automatically from the environment)
+                for pull_info in pending_hfpulls.values():
+                    if pull_info.get("hf_token") and "HF_TOKEN" not in env_vars:
+                        env_vars["HF_TOKEN"] = pull_info["hf_token"]
+                        break
+                hfpull_lines = [
+                    "# -- gbserver: inline hfpull for inputs --",
+                    "pip install --no-cache-dir 'huggingface_hub[cli]' 2>/dev/null || true",
+                ]
+                for bid, pull_info in pending_hfpulls.items():
+                    cmd = f'hf download "{pull_info["repo"]}" --local-dir "{pull_info["path"]}"'
+                    if pull_info.get("revision"):
+                        cmd += f' --revision "{pull_info["revision"]}"'
+                    if pull_info.get("type"):
+                        cmd += f' --repo-type {pull_info["type"]}'
+                    hfpull_lines.append(cmd)
+                hfpull_lines.append("# -- end inline hfpull --")
+                hfpull_block = "\n".join(hfpull_lines) + "\n"
+                setup_script = hfpull_block + setup_script
+                logger.info(
+                    "Injected %d inline hfpull download(s) into setup script",
+                    len(pending_hfpulls),
+                )
+
             run_script = launcher_config.get("run", "")
             if build_workdir:
                 run_script = (
@@ -442,7 +521,7 @@ class Skypilot(Environment):
             # Build sky.Task
             task = sky.Task(
                 name=cluster_name,
-                setup=launcher_config.get("setup") or None,
+                setup=setup_script or None,
                 run=run_script,
                 envs=env_vars if env_vars else None,
                 resources=resources,
@@ -483,8 +562,10 @@ class Skypilot(Environment):
                     task.set_storage_mounts(storage_mounts)
 
             logger.info(
-                "Launching SkyPilot cluster: name=%s cloud=%s resources=%s",
+                "Launching SkyPilot cluster: name=%s target=%s step=%s cloud=%s resources=%s",
                 cluster_name,
+                run_metadata.get("target_name", "") if run_metadata else "",
+                run_metadata.get("targetstep_uri", "") if run_metadata else "",
                 cloud,
                 res_config,
             )
@@ -514,6 +595,58 @@ class Skypilot(Environment):
                 job_id,
                 launch_id,
             )
+
+            # Ensure log directory exists for job log streaming
+            os.makedirs(f"/tmp/sky-logs/{cluster_name}", exist_ok=True)
+
+            # Execute post-launch tasks (e.g., start evaluator sidecars) if defined
+            post_launch_task = launcher_config.get("post_launch_task")
+            if post_launch_task:
+                try:
+                    logger.info(
+                        "Executing post-launch task on cluster %s (launch_id=%s)",
+                        cluster_name,
+                        launch_id,
+                    )
+                    host_ip, ssh_key = await asyncio.to_thread(
+                        _extract_host_ssh_info, cluster_name
+                    )
+                    await _execute_on_host_via_ssh(
+                        host_ip=host_ip,
+                        ssh_key=ssh_key,
+                        commands=post_launch_task.get("run", ""),
+                        env_vars=env_vars,
+                    )
+                    logger.info(
+                        "Post-launch task completed on cluster %s (launch_id=%s)",
+                        cluster_name,
+                        launch_id,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Post-launch task failed on cluster %s (launch_id=%s): %s",
+                        cluster_name,
+                        launch_id,
+                        e,
+                    )
+                    # Emit a MESSAGE_EVENT so the failure is visible in build state
+                    if self.event_q and run_metadata:
+                        from gbserver.types.buildevent import (
+                            BuildEvent,
+                            BuildEventMessagePayload,
+                            BuildEventType,
+                            EntityRunMetadata,
+                        )
+
+                        self.event_q.put_nowait(
+                            BuildEvent(
+                                run_metadata=EntityRunMetadata(**run_metadata),
+                                type=BuildEventType.MESSAGE_EVENT,
+                                payload=BuildEventMessagePayload(
+                                    msg=f"Post-launch task failed on {cluster_name}: {e}"
+                                ),
+                            )
+                        )
 
         except Exception as e:
             logger.error("Failed to launch SkyPilot cluster for %s: %s", launch_id, e)
@@ -557,12 +690,22 @@ class Skypilot(Environment):
             GBSERVER_SKYPILOT_PROVISION_MAX_ATTEMPTS,
         )
 
+        # Use environment config retry settings if available, else fall back to env vars
+        retry_config = self.config.config.get("retry", {}) if self.config else {}
+        max_attempts = int(
+            retry_config.get("max_retries", GBSERVER_SKYPILOT_PROVISION_MAX_ATTEMPTS)
+        )
+        provision_backoff_max = int(
+            retry_config.get(
+                "provision_backoff_max",
+                max(1800, GBSERVER_SKYPILOT_PROVISION_BACKOFF_MAX),
+            )
+        )
+
         async for attempt in AsyncRetrying(
             retry=retry_if_exception(_is_transient_provision_error),
-            wait=wait_exponential(
-                multiplier=1, max=GBSERVER_SKYPILOT_PROVISION_BACKOFF_MAX
-            ),
-            stop=stop_after_attempt(max(1, GBSERVER_SKYPILOT_PROVISION_MAX_ATTEMPTS)),
+            wait=wait_exponential(multiplier=30, max=provision_backoff_max),
+            stop=stop_after_attempt(max(1, max_attempts)),
             reraise=True,
         ):
             with attempt:
@@ -752,6 +895,12 @@ class Skypilot(Environment):
         consecutive_poll_failures = 0
         max_poll_failures = 3
 
+        # Live log streaming state
+        log_stream_task: Optional[asyncio.Task] = None
+        logfile_monitor: Optional["LogFileMonitor"] = None
+        log_stream_stop = asyncio.Event()
+        lines_already_processed = 0
+
         while not stop_event.is_set():
             status = None
             poll_failed = False
@@ -816,18 +965,103 @@ class Skypilot(Environment):
                     await event_q.put(event)
                 last_status = status
 
+                # Start live log streaming when job enters RUNNING
+                if (
+                    status is not None
+                    and str(status) == "JobStatus.RUNNING"
+                    and event_log_parser_configs
+                    and event_q
+                    and entityrun_metadata
+                    and job_id is not None
+                    and log_stream_task is None
+                ):
+                    log_stream_task, logfile_monitor = self._start_log_stream_task(
+                        cluster_name=cluster_name,
+                        job_id=job_id,
+                        launch_id=launch_id,
+                        event_q=event_q,
+                        entityrun_metadata=entityrun_metadata,
+                        event_log_parser_configs=event_log_parser_configs,
+                        stop_event=log_stream_stop,
+                        abort_event=stop_event,
+                        start_line=0,
+                    )
+
+            # Check if log stream task failed and needs restart
+            if log_stream_task is not None and log_stream_task.done():
+                exc = (
+                    log_stream_task.exception()
+                    if not log_stream_task.cancelled()
+                    else None
+                )
+                processed = logfile_monitor.line_num if logfile_monitor else 0
+                if exc is not None:
+                    logger.warning(
+                        "Log stream task failed after %d lines for %s job %s: %s. "
+                        "Attempting restart.",
+                        processed,
+                        cluster_name,
+                        job_id,
+                        exc,
+                    )
+                    log_stream_stop = asyncio.Event()
+                    log_stream_task, logfile_monitor = self._start_log_stream_task(
+                        cluster_name=cluster_name,
+                        job_id=job_id,
+                        launch_id=launch_id,
+                        event_q=event_q,
+                        entityrun_metadata=entityrun_metadata,
+                        event_log_parser_configs=event_log_parser_configs,
+                        stop_event=log_stream_stop,
+                        abort_event=stop_event,
+                        start_line=processed,
+                    )
+                else:
+                    lines_already_processed = processed
+                    log_stream_task = None
+
             if status is not None and status.is_terminal():
                 logger.info(
                     "SkyPilot job %s reached terminal status: %s",
                     job_id,
                     status,
                 )
+                # Stop the live log stream and determine how many lines it covered
+                if log_stream_task is not None and not log_stream_task.done():
+                    log_stream_stop.set()
+                    try:
+                        await asyncio.wait_for(log_stream_task, timeout=15.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        logger.warning(
+                            "Log stream task did not finish in time for %s job %s, cancelling",
+                            cluster_name,
+                            job_id,
+                        )
+                        log_stream_task.cancel()
+                        try:
+                            await log_stream_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                if logfile_monitor is not None:
+                    # Use lines_consumed from the stream source (not line_num
+                    # from the monitor) to avoid re-emitting events for lines
+                    # that were read from the log but not yet processed by the
+                    # monitor when the stream was cancelled.
+                    lines_already_processed = getattr(
+                        logfile_monitor.stream_source,
+                        "lines_consumed",
+                        logfile_monitor.line_num,
+                    )
+
                 if (
                     event_log_parser_configs
                     and event_q
                     and entityrun_metadata
                     and job_id is not None
+                    and lines_already_processed == 0
                 ):
+                    # Only download and parse logs if the live stream didn't run
+                    # (lines_already_processed > 0 means the stream covered them).
                     await self._download_and_parse_logs(
                         cluster_name=cluster_name,
                         job_id=job_id,
@@ -835,6 +1069,7 @@ class Skypilot(Environment):
                         event_q=event_q,
                         entityrun_metadata=entityrun_metadata,
                         event_log_parser_configs=event_log_parser_configs,
+                        start_line_num=lines_already_processed,
                     )
                 if str(status) != "JobStatus.SUCCEEDED":
                     if event_q and entityrun_metadata:
@@ -875,9 +1110,67 @@ class Skypilot(Environment):
 
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
-                return  # stop_event was set
+                # stop_event was set (retry or external cancellation) — clean up log stream
+                if log_stream_task is not None and not log_stream_task.done():
+                    log_stream_stop.set()
+                    log_stream_task.cancel()
+                    try:
+                        await log_stream_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                return
             except asyncio.TimeoutError:
                 pass  # Normal timeout, continue polling
+
+    def _start_log_stream_task(
+        self: Self,
+        cluster_name: str,
+        job_id: int,
+        launch_id: str,
+        event_q: asyncio.Queue,
+        entityrun_metadata,
+        event_log_parser_configs: list,
+        stop_event: asyncio.Event,
+        abort_event: asyncio.Event,
+        start_line: int = 0,
+    ) -> Tuple[asyncio.Task, "LogFileMonitor"]:
+        """Create and launch a log streaming task for a SkyPilot job."""
+        from gbserver.monitoring.logfile_monitor import LogFileMonitor
+        from gbserver.monitoring.streams.skypilot_log_stream import (
+            SkyPilotLogStreamSource,
+        )
+
+        # Open a local log file for streaming writes
+        tmp_log_dir = f"/tmp/sky-logs/{cluster_name}"
+        os.makedirs(tmp_log_dir, exist_ok=True)
+        log_file_path = f"{tmp_log_dir}/job-{job_id}.log"
+        log_file = open(log_file_path, "a", encoding="utf-8")
+        logger.info("Streaming job logs to %s", log_file_path)
+
+        stream_source = SkyPilotLogStreamSource(
+            cluster_name=cluster_name,
+            job_id=job_id,
+            start_line=start_line,
+            abort_event=abort_event,
+            log_file=log_file,
+        )
+        monitor = LogFileMonitor(
+            step_id=launch_id,
+            stream_source=stream_source,
+            event_configs=event_log_parser_configs,
+            launch_id=launch_id,
+            entityrun_metadata=entityrun_metadata,
+            event_queue=event_q,
+            stop_event=stop_event,
+        )
+        task = asyncio.create_task(monitor.monitor())
+        logger.info(
+            "Started live log stream for %s job %s (start_line=%d)",
+            cluster_name,
+            job_id,
+            start_line,
+        )
+        return task, monitor
 
     async def _download_and_parse_logs(
         self: Self,
@@ -887,8 +1180,23 @@ class Skypilot(Environment):
         event_q: asyncio.Queue,
         entityrun_metadata,
         event_log_parser_configs: list,
+        start_line_num: int = 0,
     ) -> None:
-        """Download job logs and parse for artifact events."""
+        """Download job logs and parse for artifact events.
+
+        Args:
+            start_line_num: Skip lines at or below this number (1-based).
+                Used to avoid re-emitting events already processed by live
+                log streaming.
+        """
+        if start_line_num > 0:
+            logger.info(
+                "Downloading logs for %s job %s, skipping first %d lines "
+                "(already processed by live stream)",
+                cluster_name,
+                job_id,
+                start_line_num,
+            )
         try:
             log_dir = _download_logs_with_retry(cluster_name, job_id)
             if not log_dir:
@@ -900,6 +1208,23 @@ class Skypilot(Environment):
                 return
 
             log_dir = os.path.expanduser(log_dir)
+            # Save a copy to /tmp for easy debugging access
+            tmp_log_dir = f"/tmp/sky-logs/{cluster_name}/job-{job_id}"
+            os.makedirs(tmp_log_dir, exist_ok=True)
+            for f in glob.glob(f"{log_dir}/*"):
+                try:
+                    import shutil
+
+                    shutil.copy2(f, tmp_log_dir)
+                except OSError:
+                    pass
+            logger.info(
+                "Saved job logs to %s (cluster %s job %s)",
+                tmp_log_dir,
+                cluster_name,
+                job_id,
+            )
+
             log_files = sorted(glob.glob(f"{log_dir}/*.log"))
             if not log_files:
                 logger.info(
@@ -914,6 +1239,8 @@ class Skypilot(Environment):
                 try:
                     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
                         for line_num, line in enumerate(f, 1):
+                            if line_num <= start_line_num:
+                                continue
                             line = line.rstrip("\n")
                             if line:
                                 await self.get_events_from_log_line(
@@ -1102,11 +1429,17 @@ class Skypilot(Environment):
         flakes, transient distributed-training crashes, preempted spot
         VMs) where finer signals are rarely available without custom
         log parsers.
+
+        Reads ``retry.delay_seconds`` from environment config for backoff
+        between retry attempts (default: 0).
         """
         # Local import to avoid circular dependencies at module load.
         from gbserver.resilience.strategies.any_failure import AnyFailureRetryStrategy
 
-        return [AnyFailureRetryStrategy()]
+        delay = 0.0
+        if self.config is not None:
+            delay = float(self.config.config.get("retry", {}).get("delay_seconds", 0))
+        return [AnyFailureRetryStrategy(retry_delay_seconds=delay)]
 
     def _get_retry_test_scenario(self: Self) -> Optional[str]:
         """Scenario name used by ``_inject_event_to_trigger_retry_when_testing``.
@@ -1136,6 +1469,10 @@ class Skypilot(Environment):
         and queues the builtin hfpull step (its Skypilot launcher uses ``hf
         download``).  Returns a binding dict whose ``path`` points at the cache
         location so downstream steps can consume the downloaded snapshot.
+
+        When ``inline: true`` is set in the storeload config, the download is
+        deferred to the main step's setup phase (no separate cluster launched).
+        This is required for environments without shared filesystems (e.g. AWS).
         """
         from gbcommon.uri.hf import HfURI
         from gbserver.asset.hfstore import Hfstore
@@ -1162,14 +1499,40 @@ class Skypilot(Environment):
             cache_dir / hfuri.get_owner() / hfuri.get_repo() / hfuri.get_revision()
         )
 
+        hf_token = assetstore.resolve_token(hfuri) or ""
+        binding_config = {"binding": {"path": str(binding_path)}}
+
+        # Inline mode: stash download metadata for injection into the main
+        # step's setup script rather than launching a separate cluster.
+        inline = (
+            storeload_config is not None
+            and isinstance(getattr(storeload_config, "config", None), dict)
+            and storeload_config.config.get("inline", False)
+        )
+        if inline:
+            # Embed hfpull metadata in the binding_config so it flows per-step
+            # through kwargs["bindings"] to _launch_skypilot_inner (no shared state).
+            binding_config["_hfpull"] = {
+                "path": str(binding_path),
+                "repo": f"{hfuri.get_owner()}/{hfuri.get_repo()}",
+                "revision": hfuri.get_revision(),
+                "type": hfuri.get_hf_type() or "model",
+                "uri": str(hfuri),
+                "hf_token": hf_token,
+            }
+            logger.info(
+                "pullasset_hfstore: inline mode — deferring download of %s to main step setup (dest=%s)",
+                str(hfuri),
+                binding_path,
+            )
+            return binding_config, None
+
+        # Default: launch a separate hfpull step on its own cluster
         hfpull_config = Hfstore.build_hfpull_step_config(
             hfuri=hfuri,
             binding_path=str(binding_path),
         )
-        hf_token = assetstore.resolve_token(hfuri) or ""
 
-        # Use a space:// URI so the resolver picks the env-keyed split
-        # (`builtins/steps/<env-class>/hfpull/`) for the active env class.
         hfpull_stepuri = "space://steps/hfpull"
         if (
             storeload_config is not None
@@ -1192,7 +1555,6 @@ class Skypilot(Environment):
                 "launcher_config": {"envs": {"HF_TOKEN": hf_token}},
             },
         )
-        binding_config = {"binding": {"path": str(binding_path)}}
         return binding_config, pull_step_config
 
     async def pullasset_envstore(
