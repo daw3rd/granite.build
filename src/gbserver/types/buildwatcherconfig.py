@@ -24,6 +24,7 @@ from gbserver.types.constants import (
     DEFAULT_ROOT_BUILDWATCHER_WORKSPACE_DIR,
     DEFAULT_ROOT_WORKSPACE_DIR,
     ENV_VAR_DEFAULT_BUILDRUNNER_TYPE,
+    MIN_MONITORING_INTERVAL_SECONDS,
 )
 from gbserver.types.spacesconfig import CLISpacesConfig
 
@@ -32,7 +33,9 @@ class BuildWatcherConfig(CLISpacesConfig):
     """The build watcher config."""
 
     lh_max_retries: int = 3
-    monitoring_interval: int = 5
+    # Floored at the minimum so a 0/negative interval (which would busy-loop the
+    # poll loop and hammer storage) is rejected at construction.
+    monitoring_interval: int = Field(default=5, ge=MIN_MONITORING_INTERVAL_SECONDS)
     gh_api_endpoint: str = DEFAULT_GH_API_ENDPOINT
     workspace_dir: str = DEFAULT_ROOT_WORKSPACE_DIR
     watcher_workspace_dir: str = DEFAULT_ROOT_BUILDWATCHER_WORKSPACE_DIR

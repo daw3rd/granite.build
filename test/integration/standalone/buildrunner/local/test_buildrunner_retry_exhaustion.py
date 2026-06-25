@@ -98,17 +98,22 @@ class TestBuildWatcherRetryExhaustion(AbstractBuildTest):
         self.storage.build_storage.add(stored_build)
 
         watcher = BuildWatcher(gh_token="", all_build_space_uri=spec.space_uri)
-        # Thread runner (no cluster) and continuous polling so the watcher reliably
-        # observes retry builds during their brief PENDING window.
+        # Thread runner (no cluster) and fast (1s) polling so the watcher reliably
+        # observes retry builds during their brief PENDING window. 1s is the minimum
+        # interval (sub-second values busy-loop and are floored); the chain-settle
+        # wait below gives it up to spec.timeout_minutes to observe everything.
         watcher.config.buildrunner_type = "thread"
-        watcher.config.monitoring_interval = 0
+        watcher.config.monitoring_interval = 1
 
         thread = ExceptionRaisingThread(
             name="BuildWatcher", target=watcher.start_and_wait, args=()
         )
         thread.start()
         try:
-            self._wait_until_chain_settles(timeout_seconds=spec.timeout_minutes * 60)
+            self._wait_until_chain_settles(
+                timeout_seconds=spec.timeout_minutes * 60,
+                max_retries=max_retries,
+            )
         finally:
             watcher.stop()
             thread.join(timeout=60)
@@ -131,30 +136,45 @@ class TestBuildWatcherRetryExhaustion(AbstractBuildTest):
             f"got {retry_counts}"
         )
 
-    def _wait_until_chain_settles(self, timeout_seconds: float) -> None:
-        """Block until no build is in flight and the build count is stable.
+    def _wait_until_chain_settles(
+        self, timeout_seconds: float, max_retries: int
+    ) -> None:
+        """Block until the retry chain has genuinely exhausted its retries.
 
-        Settled means: at least one build exists, none are in an in-flight status,
-        and the total count has not changed across two consecutive polls (so a
-        late duplicate dispatch has a chance to appear before we assert).
+        The chain is settled only once the final allowed attempt
+        (``retry_count == max_retries``) has reached a terminal state and no
+        build is still in flight.
+
+        Keying on the exhausting attempt is required to avoid a race: between a
+        build's ``RUNNING -> FAILED`` finalization and the next retry being
+        persisted as ``RETRY_PENDING`` there is a brief window where every build
+        looks terminal and the count is momentarily stable.  A "no in-flight +
+        stable count" heuristic can return during that window — before the last
+        retry runs — and the subsequent ``watcher.stop()`` then tears down the
+        BuildRunner mid-chain, cancelling the pending retry (and re-marking the
+        whole chain CANCELLED). Waiting for the ``max_retries`` attempt to become
+        terminal removes that window, since no further retry can be spawned.
 
         Args:
             timeout_seconds: Maximum time to wait for the chain to settle.
+            max_retries: The configured retry ceiling; the chain is exhausted
+                once a build with this ``retry_count`` is terminal.
 
         Raises:
             AssertionError: if the chain has not settled before the timeout.
         """
-        poll = 2.0
-        prev_count = -1
+        poll = 1.0
         start = time()
         while time() - start <= timeout_seconds:
             builds = self.storage.build_storage.get_by_uuid(None) or []
             in_flight = [b for b in builds if b.status in _IN_FLIGHT]
-            if builds and not in_flight and len(builds) == prev_count:
+            exhausted = any(
+                b.retry_count == max_retries and b.status.is_finished() for b in builds
+            )
+            if exhausted and not in_flight:
                 return
-            prev_count = len(builds)
             sleep(poll)
         assert False, (
-            f"Retry chain did not settle within {timeout_seconds}s; "
-            f"last seen {prev_count} build(s)."
+            f"Retry chain did not exhaust {max_retries} retries within "
+            f"{timeout_seconds}s; last seen {len(builds)} build(s)."
         )
