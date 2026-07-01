@@ -243,7 +243,7 @@ The REST API is available at `/api/v1` when the server is running. Start with `g
 The [`docs/`](docs/) directory has complete reference material. Three reading paths from the [docs index](docs/README.md):
 
 - **Writing a build** → [`build.yaml` reference](docs/builds/build-yaml-reference.md), [CLI reference](docs/cli/gb-cli-reference.md), [HuggingFace push](docs/builds/hf-push.md), [build features](docs/builds/README.md#advanced) (retry, target reuse, lineage), [gbtest](docs/cli/gbtest-cli-reference.md).
-- **Running gbserver** → [environments](docs/environments/README.md), [environment setup](docs/environments/setup/), [SkyPilot Kubernetes setup](docs/environments/setup/skypilot-kubernetes-setup.md), [troubleshooting](docs/help/troubleshooting.md).
+- **Running gbserver** → [environments](docs/environments/README.md), [configuration](docs/configuration/README.md), [REST API](docs/rest-api/README.md), [troubleshooting](docs/help/troubleshooting.md).
 - **Changing gbserver** → [architecture diagram](docs/architecture/arch-diagram.md), [environment classes](docs/architecture/environment-classes.md).
 
 ## Try the demos
