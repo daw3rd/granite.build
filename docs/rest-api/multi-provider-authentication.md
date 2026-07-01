@@ -200,15 +200,15 @@ default_provider = "ibmid"   # "github", "ibmid", or "apikey" — set automatica
 [user.github]
 token = "ghp_..."
 login = "username"
-email = "user@ibm.com"
+email = "user@example.com"
 
 [user.ibmid]
 access_token = "eyJhbG..."
 id_token = "eyJhbG..."
 refresh_token = "..."
 expires_at = 1713200000
-login = "user@ibm.com"
-email = "user@ibm.com"
+login = "user@example.com"
+email = "user@example.com"
 name = "John Doe"
 
 [user.gbserver]
