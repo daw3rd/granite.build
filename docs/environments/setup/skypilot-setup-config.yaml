@@ -18,15 +18,15 @@ service_account:
 image_pull_secret:
   name:
     env: IMAGE_PULL_SECRET_NAME
-    default: all-icr-io
+    default: registry-credentials
     description: Name of the docker-registry secret
   registry:
     env: IMAGE_PULL_SECRET_REGISTRY
-    default: us.icr.io
+    default: registry.example.com
     description: Container registry URL
   username:
     env: IMAGE_PULL_SECRET_USERNAME
-    default: iamapikey
+    default: <registry-username>
     description: Registry username
   password:
     env: IMAGE_PULL_SECRET_PASSWORD
