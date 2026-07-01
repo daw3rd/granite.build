@@ -16,9 +16,11 @@
 
 """APIRouter for build event subscription."""
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
+from gbserver.messaging.rabbitmq_admin import RabbitMQAdminError
 from gbserver.messaging.subscription_service import provision_subscription
 from gbserver.storage.singleton_storage import get_admin_storage
 from gbserver.storage.stored_build import StoredBuild
@@ -36,6 +38,7 @@ class SubscribeResponse(BaseModel):
     delivery_type: str
     host: str
     port: int
+    tls: bool = False
     username: str | None = None
     password: str | None = None
     exchange: str | None = None
@@ -80,5 +83,37 @@ async def subscribe_build_events(build_id: str, request: Request) -> SubscribeRe
     assert isinstance(build, StoredBuild)
 
     # 3. Provision credentials via messaging layer
-    result = await provision_subscription(build_id)
+    try:
+        result = await provision_subscription(build_id)
+    except RabbitMQAdminError as exc:
+        logger.error(
+            "RabbitMQ admin API error while provisioning subscription "
+            "for build %s: %s",
+            build_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Event subscription service unavailable.",
+        ) from exc
+    except httpx.ConnectError as exc:
+        logger.error(
+            "Cannot reach RabbitMQ management API for build %s: %s",
+            build_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Event subscription service unreachable.",
+        ) from exc
+    except httpx.TimeoutException as exc:
+        logger.error(
+            "Timeout contacting RabbitMQ management API for build %s: %s",
+            build_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Event subscription service timed out.",
+        ) from exc
     return SubscribeResponse(**result)
