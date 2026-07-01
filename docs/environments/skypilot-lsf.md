@@ -140,7 +140,7 @@ targets:
         config:
           sage_eval_config:
             model_path: "{{ bindings.model_checkpoint.binding.path }}"
-            image_id: "docker:us.icr.io/cil15-shared-registry/sage-py311-olmes:0.025"
+            image_id: "docker:your-favorite-registry/sage-py311-olmes:0.025"
             # ...
           launcher_config:
             resources:

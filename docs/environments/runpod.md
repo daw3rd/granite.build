@@ -65,7 +65,7 @@ launchers:
     monitors:
       - pod_status
     config:
-      image: "us.icr.io/my-namespace/fms-tuning:latest"  # Required. Pod Docker image.
+      image: "docker.io/my-namespace/fms-tuning:latest"  # Required. Pod Docker image.
       command: ""                                         # Optional. docker_args for the pod.
       env:                                                # Optional. Extra env vars for the pod.
         HF_TOKEN: <token>
