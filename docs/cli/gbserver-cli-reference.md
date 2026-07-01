@@ -60,24 +60,19 @@ workers; it is not invoked directly.
 
 ## Key environment variables
 
-`gbserver` reads most of its configuration from `GBSERVER_*` env vars. For the full grouped reference,
-config files, and the `GB_ENVIRONMENT` mechanism see [Configuration](../configuration/README.md); the
-exhaustive source of truth is [`src/gbserver/types/constants.py`](../../src/gbserver/types/constants.py).
-The most common:
+`gbserver`'s behaviour is driven mostly by `GBSERVER_*` / `GB_*` env vars. The full grouped reference,
+the config files, and the `GB_ENVIRONMENT` / standalone mechanics live in
+**[Configuration](../configuration/README.md)** (source of truth:
+[`constants.py`](../../src/gbserver/types/constants.py)). A few that most directly affect these commands:
 
 | Variable | Purpose |
 |----------|---------|
-| `GB_ENVIRONMENT` | `DEV` / `STAGING` / `PROD` / `STANDALONE` — selects cluster, namespace, storage, and standalone defaults. |
-| `GBSERVER_METADATA_STORAGE` | `sql` (default) or `sqlite` (standalone default). |
-| `GBSERVER_DEFAULT_BUILDRUNNER_TYPE` | `job` (k8s), `process`, or `thread`. Set `thread` for local dev. |
-| `GBSERVER_AUTH_MODE` | `github` (default), `apikey`, `ibmid`, or `multi`. Standalone defaults to `apikey`. |
-| `GBSERVER_API_KEY` | Shared secret for API-key auth (standalone/remote). |
-| `GBSERVER_GITHUB_TOKEN` | GitHub Enterprise token used by the watchers/runner. |
-| `GBSERVER_NATS_EMBEDDED` | Start an embedded NATS server (standalone default `true`). |
+| `GB_ENVIRONMENT` | `DEV` / `STAGING` / `PROD` / `STANDALONE` — the profile every command runs under (`standalone` forces `STANDALONE`). |
+| `GBSERVER_DEFAULT_BUILDRUNNER_TYPE` | `job` (k8s), `process`, or `thread` — how `build-watch` / `build-runner` execute builds. |
+| `GBSERVER_GITHUB_TOKEN` | Default GitHub token for the watchers/runner (overridable per-command with `--gh-token`). |
 
-See the [REST API docs](../rest-api/README.md#authentication) for the auth modes,
-[Secrets](../secrets/README.md) for credential resolution, and [Spaces](../spaces/README.md) for how a
-space is registered and referenced by name.
+For everything else — storage, [authentication](../rest-api/README.md#authentication), messaging, image
+tags, etc. — see [Configuration](../configuration/README.md).
 
 ## Where commands live
 
