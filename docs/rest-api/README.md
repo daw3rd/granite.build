@@ -21,21 +21,19 @@ Then open the interactive OpenAPI (Swagger) UI. **Each API group is mounted as i
 its own docs page** — the root `/docs` only covers the root app. The Swagger UI for each group (append
 `/openapi.json` instead of `/docs` for the raw schema):
 
-```
-http://localhost:8080/api/v1/auth/docs         # OIDC login proxy
-http://localhost:8080/api/v1/builds/docs        # builds
-http://localhost:8080/api/v1/artifacts/docs     # artifacts
-http://localhost:8080/api/v1/spaces/docs        # spaces
-http://localhost:8080/api/v1/logs/docs          # logs
-http://localhost:8080/api/v1/lineage/docs       # lineage
-http://localhost:8080/api/v1/secrets/docs       # secrets
-http://localhost:8080/api/v1/node-health/docs   # node health
-```
+- [`http://localhost:8080/api/v1/auth/docs`](http://localhost:8080/api/v1/auth/docs) — OIDC login proxy
+- [`http://localhost:8080/api/v1/builds/docs`](http://localhost:8080/api/v1/builds/docs) — builds
+- [`http://localhost:8080/api/v1/artifacts/docs`](http://localhost:8080/api/v1/artifacts/docs) — artifacts
+- [`http://localhost:8080/api/v1/spaces/docs`](http://localhost:8080/api/v1/spaces/docs) — spaces
+- [`http://localhost:8080/api/v1/logs/docs`](http://localhost:8080/api/v1/logs/docs) — logs
+- [`http://localhost:8080/api/v1/lineage/docs`](http://localhost:8080/api/v1/lineage/docs) — lineage
+- [`http://localhost:8080/api/v1/secrets/docs`](http://localhost:8080/api/v1/secrets/docs) — secrets
+- [`http://localhost:8080/api/v1/node-health/docs`](http://localhost:8080/api/v1/node-health/docs) — node health
 
 The `/docs` and `/openapi.json` pages load **without authentication** in every mode, so they work even
 against a secured server. (Build-event subscription is `include_router`'d on the **root** app rather than
 mounted as a sub-app, so — unlike the groups above — it appears in the **root** docs at
-`http://localhost:8080/docs`, even though its URL lives under `/api/v1/builds`.)
+[`http://localhost:8080/docs`](http://localhost:8080/docs), even though its URL lives under `/api/v1/builds`.)
 
 ## Authentication
 
