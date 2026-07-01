@@ -81,20 +81,13 @@ type's `config:` block.
 ### Asset stores
 
 `assetstores` map a store URI to the **load** (input) and **push** (output) behaviour for this
-environment. Each `load`/`push` entry has a `mode` and an optional `config`. For the store types
-themselves — their URI schemes, secrets, and configuration — see [Asset stores](../asset-stores/README.md).
-Common modes:
+environment. Each `load`/`push` entry has a `mode` (e.g. `hf_pull`/`hf_push`, `cos_rclone`, `env_local`,
+`default`) and an optional `config`. Modes are implemented by `pullasset_*` / `pushasset_*` methods on the
+environment class, which may queue a built-in step (e.g. `hf_pull` injects an
+[hfpull](../../src/gbserver/builtins/) step); the exact set is per-type — see each page.
 
-| `mode` | Direction | Effect |
-|--------|-----------|--------|
-| `hf_pull` / `hf_push` | load / push | Download from / upload to a HuggingFace repo. |
-| `cos_rclone` / `cos_pull` / `cos_push` | load / push | IBM COS / S3-compatible transfer (rclone). |
-| `env_local` | load / push | No-op: the artifact already lives on a shared filesystem reachable by the worker; resolves `env://<path>` straight through without transferring data. Used by bare-metal HPC backends. |
-| `default` | load / push | The environment's built-in handling for that store. |
-
-Modes are implemented by `pullasset_*` / `pushasset_*` methods on the environment class, which may
-queue a built-in step (e.g. `hf_pull` injects an [hfpull](../../src/gbserver/builtins/) step). The
-exact set of supported modes is per-type — see each page.
+For the full list of modes and the store types themselves (URI schemes, secrets, configuration), see
+[Asset stores](../asset-stores/README.md#load-and-push-modes).
 
 ## `step.yaml` — `environment_configs` (common structure)
 
