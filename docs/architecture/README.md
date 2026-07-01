@@ -56,7 +56,7 @@ An **environment** is the compute backend a target runs on, implemented as a sub
 ### Asset stores
 
 **Asset stores** describe where a build's artifacts live and how to reach them, selected by URI scheme —
-File, Git, COS/S3, HuggingFace, Lakehouse, and env-local (already-on-a-shared-filesystem). The store
+File, Git, COS/S3, HuggingFace, and env-local (already-on-a-shared-filesystem). The store
 resolves the location and credentials; the environment performs the transfer. See
 [Asset stores](../asset-stores/README.md).
 

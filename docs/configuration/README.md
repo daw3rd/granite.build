@@ -23,7 +23,7 @@ The variables an operator most often sets. (Full grouped list in [environment-va
 
 | Variable | Purpose |
 |----------|---------|
-| `GB_ENVIRONMENT` | `DEV` / `STAGING` / `PROD` / `STANDALONE` — selects cluster, namespace, SQL schema, Lakehouse, and (for `STANDALONE`) a set of local defaults. See [gb-environment.md](gb-environment.md). |
+| `GB_ENVIRONMENT` | `DEV` / `STAGING` / `PROD` / `STANDALONE` — selects cluster, namespace, SQL schema, and (for `STANDALONE`) a set of local defaults. See [gb-environment.md](gb-environment.md). |
 | `GBSERVER_METADATA_STORAGE` | `sql` (PostgreSQL, default) or `sqlite` (standalone/local). |
 | `GBSERVER_DEFAULT_BUILDRUNNER_TYPE` | How builds run: `job` (Kubernetes), `process`, or `thread` (use `thread` for local). |
 | `GBSERVER_DEFAULT_LOG_LEVEL` | `debug` / `info` (default) / `warning` / `error` / `critical`. |

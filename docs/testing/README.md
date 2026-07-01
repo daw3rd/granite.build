@@ -89,7 +89,7 @@ that shares state doesn't split across processes).
 Tests are tagged with markers (declared in `pyproject.toml`); suites select tests with `-m` expressions.
 The two you'll reach for most:
 
-- **`ibm`** — requires **IBM infrastructure** (cloud, cluster, Lakehouse, RabbitMQ, …). Open-source and
+- **`ibm`** — requires **IBM infrastructure** (cloud, cluster, RabbitMQ, …). Open-source and
   standalone runs exclude these with `-m "not ibm"`. Running them needs the
   [IBM-infrastructure env vars](#test-modes-and-environment-variables) below.
 - **`extended`** — slow / real-infrastructure tests (defined as `extended_testing_only = pytest.mark.extended`

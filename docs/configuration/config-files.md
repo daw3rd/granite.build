@@ -13,11 +13,10 @@ watchers poll).
 The global option `gbserver --server-runtime-config <path>` registers **per-environment defaults** from a
 YAML file, loaded by [`gbserverenvconfig.py`](../../src/gbserver/types/gbserverenvconfig.py) into a
 `GBEnvConfig`. It lets you define (or override) a deployment environment's defaults — the cluster,
-namespace, SQL schema, Lakehouse binding, space git URI, feature flags, etc. — without editing code.
+namespace, SQL schema, space git URI, feature flags, etc. — without editing code.
 
 ```yaml
 env: MYENV                      # environment name this config defines
-lakehouse_environment: STAGING  # Lakehouse env it binds to
 default_sql_schema: my_schema
 default_pod_namespace: my-namespace
 public_space_git_uri: https://github.com/my-org/my-space
@@ -43,15 +42,14 @@ spaces:                       # spaces to watch; empty/omitted = all spaces
   - name: public
   - name: my-space
 monitoring_interval: 5        # poll/monitor interval, seconds (floored at the minimum)
-lh_max_retries: 3             # Lakehouse retry attempts
 buildrunner_type: job         # thread | process | job (defaults to GBSERVER_DEFAULT_BUILDRUNNER_TYPE)
 gh_api_endpoint: https://api.github.com
 workspace_dir: gbserverworkspace
 watcher_workspace_dir: gbserverworkspace/gbserver-buildwatcher-workspace
 ```
 
-**`pr-watch`** — [`PrWatcherConfig`](../../src/gbserver/types/prwatcherconfig.py): the same `spaces`,
-`monitoring_interval`, and `lh_max_retries`, plus `validate_inputs_are_registered: true`.
+**`pr-watch`** — [`PrWatcherConfig`](../../src/gbserver/types/prwatcherconfig.py): the same `spaces` and
+`monitoring_interval`, plus `validate_inputs_are_registered: true`.
 
 An empty/omitted `spaces` list means **watch all registered spaces**. Space names refer to spaces
 registered in gbserver (see [Spaces](../spaces/README.md#registering-and-referencing-a-space-by-name)).

@@ -4,14 +4,13 @@
 > [environment-variables.md](environment-variables.md).
 
 `GB_ENVIRONMENT` selects a **built-in per-environment config** that supplies defaults for the cluster,
-namespace, SQL schema, Lakehouse binding, and space git branches. The four values are `DEV`, `STAGING`,
+namespace, SQL schema, and space git branches. The four values are `DEV`, `STAGING`,
 `PROD`, and `STANDALONE`; the config objects live in
 [`src/gbcommon/types/gbenvconfig.py`](../../src/gbcommon/types/gbenvconfig.py) (default: `PROD`). These
 are defaults — individual environment variables still override them.
 
 | Aspect | `PROD` | `STAGING` | `DEV` | `STANDALONE` |
 |--------|--------|-----------|-------|--------------|
-| Lakehouse env | PROD | STAGING | STAGING | (none) |
 | K8s namespace | `llm-build-prod` | `llm-build-staging` | `llm-build-dev` | default |
 | SQL schema | `granite_dot_build_prod` | `granite_dot_build_staging` | `granite_dot_build_dev` | `standalone` |
 | Space-config branch | `gbspace-config` | `gbspace-config` | `gbspace-config` | `main` |
@@ -22,7 +21,7 @@ You can define or override an environment's defaults with a
 ## Standalone mode
 
 `GB_ENVIRONMENT=STANDALONE` (which `gbserver standalone` sets for you) is the local/offline profile: no
-Lakehouse, no Kubernetes, no IBM services required. On startup `check_and_init_for_standalone()`
+Kubernetes or IBM services required. On startup `check_and_init_for_standalone()`
 ([`src/gbserver/commands/utils.py`](../../src/gbserver/commands/utils.py)) applies these defaults **only
 where you haven't set them** (`STANDALONE_ENV_DEFAULTS` in
 [`constants.py`](../../src/gbserver/types/constants.py)):
@@ -43,7 +42,7 @@ environment: the per-user secret backend defaults to `local`, and the lineage pr
 Beyond applying those defaults, `check_and_init_for_standalone()` performs the rest of the one-time
 standalone setup: it reloads the `constants` module so import-time values pick up the defaults, installs
 the **SQLite** storage factory (migrating any legacy database first), installs the standalone **space
-access manager** (which bypasses Lakehouse authorization), and — for the standalone *server* — registers
+access manager** (which bypasses remote authorization), and — for the standalone *server* — registers
 the `--space-dir` space under `public` (and the legacy aliases `standalone` / `local`). Outside standalone
 the function is a no-op.
 

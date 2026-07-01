@@ -68,7 +68,6 @@ behaviour via a `mode`:
 |--------|-----------|--------|
 | `hf_pull` / `hf_push` | load / push | Download from / upload to a HuggingFace repo. |
 | `cos_rclone` / `cos_pull` / `cos_push` | load / push | COS / S3 transfer (rclone). |
-| `dmf_pull` (Lakehouse) | load | Pull a Lakehouse asset (via a built-in step). |
 | `env_local` | load / push | No-op: the artifact already lives on a shared filesystem reachable by the worker. |
 | `default` | load / push | The environment's built-in handling for that store. |
 
