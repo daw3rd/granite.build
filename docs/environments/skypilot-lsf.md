@@ -53,14 +53,14 @@ config:
         - bluevela
       cluster_configs:
         bluevela:
-          workdir: /proj/granite-build/g4os/skypilot
+          workdir: /.../granite-build/g4os/skypilot
           tmpdir: /opt/nvme/$USER/skypilot-tmp
           enroot:                          # Container runtime on the LSF nodes.
             enabled: true
-            share_path: /proj/granite-build/g4os
+            share_path: /.../granite-build/g4os
             use_local_nvme: true
             squash_options: "-comp lz4 -Xhc -no-xattrs"
-          nccl_tuning_file: /proj/granite-build/g4os/bv-nccl-tuning.sh
+          nccl_tuning_file: /.../granite-build/g4os/bv-nccl-tuning.sh
           queue: normal
           bsub_options:
             G: grp_granite_dot_build
@@ -134,7 +134,7 @@ targets:
     outputs:
       sage_eval_results:
         type: dataset
-        uri: "env:///proj/granite-build/g4os/sage/.../gsm8k"
+        uri: "env:///.../granite-build/g4os/sage/gsm8k"
     steps:
       - step_uri: space://steps/sage-eval
         config:
