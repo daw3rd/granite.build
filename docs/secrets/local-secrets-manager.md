@@ -62,7 +62,7 @@ secret_manager:
     remote_sync_config:
       type: ibmcloud
       config:
-        service_url: https://3a634e1e-2591-4a19-baa8-34cf8f12defb.us-east.secrets-manager.appdomain.cloud
+        service_url: https://<instance-id>.us-east.secrets-manager.appdomain.cloud
 ```
 
 ## Configuration Fields

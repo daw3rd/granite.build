@@ -5,7 +5,7 @@
 > see [step-resolution.md](step-resolution.md).
 
 An **environment** is the compute backend a build target runs on. Each target in a `build.yaml`
-names an `environment_uri` (e.g. `space://environments/skypilot/lsf/ibm-bluevela`); that points at
+names an `environment_uri` (e.g. `space://environments/bash`); that points at
 an environment asset whose `environment.yaml` declares the environment **type**, its credentials and
 behaviour, and the asset stores reachable from it. The `space://` URI is resolved through the active
 space's `base_uris` — see [Spaces and `space.yaml`](../spaces/README.md).

@@ -7,14 +7,13 @@
 
 ## Compute environment
 
-With `default_cloud: lsf`, SkyPilot provisions onto an existing **IBM LSF** cluster. It reaches the
+With `default_cloud: lsf`, SkyPilot provisions onto an existing **LSF** cluster. It reaches the
 cluster over **SSH** (login node) and submits jobs to an LSF queue via SkyPilot's LSF provisioner.
 gbserver materializes both the SSH reachability config and any behavioral LSF tuning from the
 environment.yaml at launch time, so the environment asset describes how to reach *and* how to run on
 the cluster.
 
-This is the path the BlueVela recipes use to drive SFT training and large eval suites on IBM's BlueVela
-cluster.
+This is the path recipes use to drive SFT training and large eval suites on an on-prem LSF cluster.
 
 ## LSF-specific configuration
 
@@ -32,11 +31,11 @@ config:
   default_cloud: lsf
   cluster_ssh_configs:
     lsf:
-      - Host: bluevela              # Cluster alias (always literal); LSF derives the cluster name here.
+      - Host: lsf-cluster           # Cluster alias (always literal); LSF derives the cluster name here.
         HostName: LSF_HOSTNAME      # Secret name (or literal). Keep sensitive values as secret names.
         User: LSF_USER
         Port: 22
-        IdentityKey: BV_SSH_KEY     # Key *contents* via a secret — gbserver writes a 0600 file and
+        IdentityKey: LSF_SSH_KEY    # Key *contents* via a secret — gbserver writes a 0600 file and
         IdentitiesOnly: "yes"       # points IdentityFile at it. Use IdentityFile instead for an
                                     # on-host key path. Specifying both is an error.
 ```
@@ -50,20 +49,20 @@ config:
   cloud_config:
     lsf:
       allowed_clusters:
-        - bluevela
+        - lsf-cluster
       cluster_configs:
-        bluevela:
-          workdir: /.../granite-build/g4os/skypilot
-          tmpdir: /opt/nvme/$USER/skypilot-tmp
+        lsf-cluster:
+          workdir: /shared/gbserver/skypilot
+          tmpdir: /local/nvme/$USER/skypilot-tmp
           enroot:                          # Container runtime on the LSF nodes.
             enabled: true
-            share_path: /.../granite-build/g4os
+            share_path: /shared/gbserver
             use_local_nvme: true
             squash_options: "-comp lz4 -Xhc -no-xattrs"
-          nccl_tuning_file: /.../granite-build/g4os/bv-nccl-tuning.sh
+          nccl_tuning_file: /shared/gbserver/nccl-tuning.sh
           queue: normal
           bsub_options:
-            G: grp_granite_dot_build
+            G: my-lsf-group
             M: 64G
 ```
 
@@ -83,7 +82,7 @@ cloud, so any value set on the env or launcher has no effect. Omit it.
 LSF jobs write outputs directly to the shared filesystem (e.g. GPFS), so outputs are registered with
 the `env_local` no-op pull/push rather than transferred. Output URIs use the `env://` scheme.
 
-## Example `environment.yaml` (BlueVela LSF)
+## Example `environment.yaml` (LSF)
 
 ```yaml
 name: sky-lsf
@@ -101,7 +100,7 @@ assetstores:
         config: {}
 ```
 
-## Example target (`build.yaml`) on BlueVela LSF
+## Example target (`build.yaml`) on LSF
 
 A recipe selects the LSF queue and cluster via `resources` on the launcher and writes its checkpoint to
 the shared filesystem. The SFT target emits a `NEWARTIFACT_IN_ENVIRONMENT_EVENT` that resolves a
@@ -110,7 +109,7 @@ the shared filesystem. The SFT target emits a `NEWARTIFACT_IN_ENVIRONMENT_EVENT`
 ```yaml
 targets:
   sft-training:
-    environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+    environment_uri: space://environments/skypilot/lsf/my-lsf
     outputs:
       checkpoint:
         uri: "env://{{ binding.path }}"   # env_local: the run-specific dir the step wrote.
@@ -122,19 +121,19 @@ targets:
           launcher_config:
             resources:
               accelerators: "H100:1"
-              cluster: "bluevela"     # Combined with default_cloud → infra=lsf/bluevela.
+              cluster: "lsf-cluster"  # Combined with default_cloud → infra=lsf/lsf-cluster.
               zone: "normal"          # LSF queue.
               memory: "1580"
 
   olmes-gsm8k:
-    environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+    environment_uri: space://environments/skypilot/lsf/my-lsf
     inputs:
       model_checkpoint:
         binding: sft-training.checkpoint
     outputs:
       sage_eval_results:
         type: dataset
-        uri: "env:///.../granite-build/g4os/sage/gsm8k"
+        uri: "env:///shared/gbserver/eval/gsm8k"
     steps:
       - step_uri: space://steps/sage-eval
         config:
@@ -145,7 +144,7 @@ targets:
           launcher_config:
             resources:
               accelerators: "H100:1"
-              cluster: "bluevela"
+              cluster: "lsf-cluster"
               zone: "preemptable"     # Eval targets run on the preemptable queue.
               memory: "256"
 ```
