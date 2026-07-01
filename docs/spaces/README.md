@@ -51,6 +51,42 @@ asset. The full three-tier resolution algorithm — env-co-located lookup, env-c
 env-agnostic fallback — is documented in
 [step-resolution.md](../environments/step-resolution.md).
 
+#### Worked example: how a space references environments and asset stores
+
+A space doesn't inline environments or asset stores — it points `base_uris` at a directory that holds
+them, and refers to them by `space://` URI. The in-repo `local` space
+([`configurations/spaces/local/space.yaml`](../../configurations/spaces/local/space.yaml)) sets
+`base_uris: [file://../../assets]`, which resolves to `configurations/assets/`:
+
+```
+configurations/spaces/local/space.yaml         # base_uris: [file://../../assets]
+configurations/assets/                          # ← what base_uris points at
+├── environments/   bash · docker · runpod · skypilot · skypilot-managed   → space://environments/<name>
+├── assetstores/    env-local · hf · local · mem · s3                      → space://assetstores/<name>
+└── steps/          per-environment step impls (e.g. k8s/)                 → space://steps/<name>
+```
+
+So a build running in this space resolves, for example:
+
+- `environment_uri: space://environments/docker` → [`configurations/assets/environments/docker/environment.yaml`](../../configurations/assets/environments/) — a complete [environment](../environments/README.md) definition;
+- `environment_uri: space://environments/skypilot/kubernetes` → `configurations/assets/environments/skypilot/kubernetes/` (the space's `DEFAULT_ENVIRONMENT` variable);
+- an [asset store](../asset-stores/README.md) reference like `space://assetstores/hf` → [`configurations/assets/assetstores/hf/`](../../configurations/assets/assetstores/).
+
+**`base_uris` is optional.** The space's own directory (the one containing `space.yaml`) is always
+searched first, ahead of any `base_uris`. So a **self-contained** space can drop the `environments/`,
+`assetstores/`, and `steps/` directories right next to its `space.yaml` and omit `base_uris` entirely:
+
+```
+my-space/
+├── space.yaml            # no base_uris needed
+├── environments/         → space://environments/<name>
+├── assetstores/          → space://assetstores/<name>
+└── steps/                → space://steps/<name>
+```
+
+Use `base_uris` when you'd rather pull assets in from elsewhere — a shared sibling directory (as the
+`local` space does) or a `git://` URL — instead of, or in addition to, colocating them.
+
 ### `secret_manager`
 
 The secret manager backend resolves every secret the build references (environment credentials, HF
