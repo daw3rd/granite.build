@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 import click
 import uvicorn
 
+from gbserver.commands.command_rest_server import _configure_analytics_env
 from gbserver.commands.utils import check_and_init_for_standalone
 from gbserver.types.constants import (
     CONFIGURATIONS_STANDALONE_SPACE_SUBPATH,
@@ -189,7 +190,10 @@ def _run_standalone(
     watcher_thread.start()
     logger.info("BuildWatcher started in background thread")
 
-    # 4. Start the REST API via uvicorn.
+    # 4. Default the analytics service's env vars (if gb_ui_backend is installed).
+    _configure_analytics_env(host=host, port=port)
+
+    # 5. Start the REST API via uvicorn.
     #    Force the "asyncio" event loop (not uvloop) to avoid subprocess-in-thread
     #    issues on macOS: uvloop's SIGCHLD handling doesn't work in non-main threads,
     #    causing BuildRunner's process.communicate() to hang indefinitely.
@@ -252,4 +256,12 @@ def cli(ctx: CliEnvironment, port: int, host: str, space_dir: Optional[str]):
     if space_dir is None:
         space_dir = _default_space_dir()
     logger.info("Using space directory: %s", space_dir)
-    _run_standalone(port=port, host=host, space_dir=space_dir)
+
+    def _log_ready():
+        browse_host = "127.0.0.1" if host == "0.0.0.0" else host
+        # Bold just the URL, matching Uvicorn's own "Uvicorn running on <bold-url>"
+        # startup banner so this line carries the same visual weight.
+        url = f"http://{browse_host}:{port}"
+        logger.info("Frontend + API available at \x1b[1m%s\x1b[0m", url)
+
+    _run_standalone(port=port, host=host, space_dir=space_dir, on_started=_log_ready)

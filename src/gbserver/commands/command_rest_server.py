@@ -21,7 +21,10 @@ import sys
 import click
 import uvicorn
 
+from gbcommon.types.constants import get_gb_home_dir
+from gbserver.storage.sqlite.sqlite_storage import SQLITE_DB_FILE_NAME
 from gbserver.types.constants import (
+    ENV_VAR_METADATA_STORAGE,
     GBSERVER_REST_SERVER_TIMEOUT_KEEP_ALIVE,
     GBSERVER_REST_SERVER_WORKERS,
 )
@@ -29,6 +32,52 @@ from gbserver.types.context import CliEnvironment, pass_environment
 from gbserver.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _configure_analytics_env(host: str = "127.0.0.1", port: int = 8080) -> None:
+    """Default the analytics service's env vars if gb_ui_backend is installed.
+
+    The analytics routers are included directly into root_api (see
+    gbserver/api/root_api.py) — this only sets sensible defaults for the env
+    vars gb_ui_backend's Config reads, so standalone analytics work out of
+    the box without requiring the caller to configure a database explicitly.
+
+    If GB_UI_DATABASE_URL is not set, defaults to the analytics service's own
+    SQLite file in the GB home directory (see ANALYTICS_DB_FILENAME in
+    gb_ui_backend/config.py).
+    If GB_UI_GBSERVER_DB_URL is not set and gbserver is running in SQLite mode,
+    defaults to gbserver's own SQLite file so standalone analytics work out of the box.
+    If GB_UI_GBSERVER_URL is not set, defaults to the main server's own host/port.
+
+    Args:
+        host: Bind address the main REST server (and frontend) is listening on.
+        port: Port the main REST server (and frontend) is listening on.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("gb_ui_backend") is None:
+        return
+
+    gb_home = get_gb_home_dir()
+
+    if not os.environ.get("GB_UI_DATABASE_URL"):
+        # mirrors ANALYTICS_DB_FILENAME in gb_ui_backend/config.py — keep in sync
+        os.environ["GB_UI_DATABASE_URL"] = (
+            f"sqlite+aiosqlite:///{os.path.join(gb_home, 'dashboard-analytics.db')}"
+        )
+
+    if (
+        not os.environ.get("GB_UI_GBSERVER_DB_URL")
+        and os.environ.get(ENV_VAR_METADATA_STORAGE, "sql").lower() == "sqlite"
+    ):
+        os.environ["GB_UI_GBSERVER_DB_URL"] = (
+            f"sqlite+aiosqlite:///{os.path.join(gb_home, SQLITE_DB_FILE_NAME)}"
+        )
+
+    if not os.environ.get("GB_UI_GBSERVER_URL"):
+        browse_host = "127.0.0.1" if host == "0.0.0.0" else host
+        os.environ["GB_UI_GBSERVER_URL"] = f"http://{browse_host}:{port}"
+
 
 _IBMID_REQUIRED_VARS = [
     "GBSERVER_IBMID_CLIENT_ID",
@@ -56,6 +105,8 @@ def cli(
                 ", ".join(missing),
             )
             sys.exit(1)
+
+    _configure_analytics_env(host="0.0.0.0", port=port)
 
     try:
         logger.info(

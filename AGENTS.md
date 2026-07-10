@@ -62,7 +62,6 @@ gbserver --help
 gbserver rest-server --help
 gbserver build-watch --build-dir <dir>
 gbserver build-runner ...
-gbserver pr-watch --gh-token $TOKEN --config <config.yaml>
 ```
 
 ## Architecture
@@ -120,6 +119,107 @@ The central registry is `src/gbserver/types/constants.py`. All gbserver env vars
 - The `xformat`/`xcheck` targets diff against the `dev` branch, not `main`
 - Python 3.11+ required (3.12 for pylint target)
 - Apache License 2.0
+
+## Frontend (gb-ui)
+
+The `frontend/` directory contains the gb-ui Next.js dashboard and `src/gb_ui_backend/` is its analytics service. Both are part of this repo after the gb-ui migration.
+
+### Frontend commands
+
+```shell
+# Compile and sync to src/gbserver/static/ui/ (incremental — reuses .next/ cache)
+make build-frontend
+
+# Full clean rebuild (wipes frontend/out/, frontend/.next/, src/gbserver/static/ui/)
+make clean-frontend && make build-frontend
+
+# Wipe all build artifacts without rebuilding
+make clean-frontend
+```
+
+`yarn build` produces a static export and removes `out/404.html` via a postbuild script so the SPA fallback handler works correctly. `build-frontend` does not call `clean-frontend` — run them together for a guaranteed fresh compile.
+
+### Running modes
+
+The frontend has two modes:
+
+**Standalone mode** — gbserver serves the compiled static files and REST API from the same origin. This is the default for end users.
+
+```shell
+make build-frontend           # compile once (or after any frontend change)
+gbserver standalone           # serves UI + API at http://localhost:8080
+```
+
+API calls use relative paths (`/api/v1`, `/api/analytics`) — no extra configuration needed. To point the frontend at a different gbserver, set `GBSERVER_API_URL` at build time:
+
+```shell
+GBSERVER_API_URL=http://other-host:8080 make build-frontend
+gbserver standalone
+```
+
+**Dev mode** — Next.js dev server at `:3000` with hot reload. Useful when iterating on UI changes without rebuilding the static export.
+
+```shell
+cd frontend && yarn dev       # UI at http://localhost:3000, no backend required
+```
+
+Without a backend, the UI loads but all data pages show empty states. To connect to a running gbserver:
+
+```shell
+# frontend/.env.local
+GBSERVER_API_URL=http://localhost:8080
+```
+
+```shell
+cd frontend && yarn dev       # proxies /api/* to gbserver at :8080 (no CORS)
+```
+
+`GBSERVER_API_URL` in `.env.local` sets the proxy destination — the browser always uses relative paths, so no CORS configuration is needed on gbserver.
+
+### Running with the analytics service
+
+`gb_ui_backend` is bundled with the `standalone` extra. If installed, gbserver includes its routers directly into its own process at startup — no separate process or port. Both DB URLs default to SQLite in `~/.granite.build/` — no configuration needed.
+
+```shell
+pip install -e ".[standalone]"
+gbserver standalone
+# Analytics routes are served at /api/analytics/* on gbserver's own port
+# Analytics DB: ~/.granite.build/dashboard-analytics.db (SQLite, auto-created)
+```
+
+To use PostgreSQL instead:
+
+```shell
+GB_UI_DATABASE_URL="postgresql+asyncpg://user:pass@host/db" gbserver standalone
+```
+
+### Frontend source layout
+
+| Path | Description |
+|------|-------------|
+| `frontend/app/` | Next.js App Router pages |
+| `frontend/components/` | Shared React components (Carbon Design System) |
+| `frontend/api/` | API clients — `gbserver.ts`, `analytics.ts`, `dataProcessing.ts` |
+| `frontend/api/client.ts` | `apiBase()` helper — handles `GBSERVER_API_URL` override |
+| `frontend/next.config.ts` | Build config — static export in standalone mode, rewrite proxy in dev |
+| `frontend/.env.local.example` | Dev environment template — copy to `.env.local` |
+| `src/gb_ui_backend/` | Analytics service — FastAPI routers for charts, AI analysis; included directly into gbserver |
+| `src/gb_ui_backend/config.py` | Pydantic settings — all `GB_UI_*` env vars |
+| `src/gbserver/api/root_api.py` | Includes gb_ui_backend's routers under `/api/analytics/*` and calls its startup init |
+| `src/gbserver/api/frontend_routes.py` | gbserver endpoints: `/api/config`, `/api/environments` |
+| `src/gbserver/static/ui/` | Compiled frontend served by gbserver at runtime |
+
+### Key env vars (frontend / analytics)
+
+| Variable | Where set | Description |
+|---|---|---|
+| `GBSERVER_API_URL` | `frontend/.env.local` or build env | API base URL. Dev: sets the rewrite proxy target. Standalone: baked into the bundle at `make build-frontend` time. Unset = same-origin default. |
+| `GBSERVER_UI_DIR` | gbserver env | Override path to compiled frontend (default: `src/gbserver/static/ui/`) |
+| `GB_UI_DATABASE_URL` | gbserver env | Analytics DB. Auto-set to `~/.granite.build/dashboard-analytics.db` (SQLite) when unset. |
+| `GB_UI_GBSERVER_DB_URL` | gbserver env | gbserver's own DB for richer analytics. Auto-set to gbserver's SQLite file when unset and storage is sqlite. |
+| `GB_UI_GBSERVER_URL` | analytics env | gbserver URL, used for the standalone dev-mode startup banner (default: `http://localhost:8080`) |
+| `GB_UI_LLM_BASE_URL` | analytics env | OpenAI-compatible endpoint for AI analysis |
+| `GB_UI_LLM_API_KEY` | analytics env | API key for the LLM endpoint |
 
 ## Deployment
 
