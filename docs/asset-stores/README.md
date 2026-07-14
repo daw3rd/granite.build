@@ -14,6 +14,17 @@ inject a built-in transfer step (`hfpull`, `cosrclone`, `lhpull` / `lhpush`) or 
 Each environment declares the stores it can reach in its `environment.yaml` `assetstores` block, and
 builds refer to them via `space://assetstores/<name>` URIs resolved through the space's `base_uris`.
 
+> **`env://` is always available.** The env-local (`env://`) store is registered implicitly for
+> **every** environment class — it does **not** need an `assetstores` entry in `environment.yaml`. Its
+> push/pull are shared-filesystem no-ops, so any backend can consume/produce `env://` artifacts. The
+> store is resolved in this order: an explicit `environment.yaml` `env://` entry wins; otherwise a
+> space-provided `space://assetstores/env-local` store *if one exists*; otherwise a bundled
+> [`builtins/assetstores/env-local`](../../src/gbserver/builtins/assetstores/env-local/store.yaml)
+> default. **No shipped space defines an `env-local` store**, so out of the box the bundled default is
+> used; adding one to a space is an optional customization. See
+> [Env-local](#store-types-and-uri-schemes) below and
+> [`Environment._register_default_envstore`](../../src/gbserver/environment/environment.py).
+
 ## Store types and URI schemes
 
 | Store | URI scheme(s) | Maps a URI to… | Credentials (default secret name) |
@@ -28,9 +39,13 @@ builds refer to them via `space://assetstores/<name>` URIs resolved through the 
 
 Notes:
 
-- **Env-local (`env://`)** is used by bare-metal HPC backends (e.g. LSF/SLURM with shared GPFS): the
-  artifact is already on a filesystem the worker can see, so the store resolves the path directly and
-  transfers nothing.
+- **Env-local (`env://`)** models an artifact that already lives on a filesystem the worker can see, so
+  the store resolves the path directly and transfers nothing. Common on bare-metal HPC backends (e.g.
+  LSF/SLURM with shared GPFS), but supported by **all** environment classes and registered
+  automatically — no `environment.yaml` `assetstores` entry is required (see the note above).
+  Because it transfers nothing, an `env://` path must be **absolute**: relative `env:` URIs (e.g.
+  `env:outputs/foo`) have no resolution root and are **rejected at build-config load**. Use an absolute
+  `env:///…` (a templated `env://{{ binding.path }}` is fine — it resolves to an absolute path).
 - **In-memory (`mem://`)** passes a producer's binding value (e.g. a service URL) verbatim to downstream
   consumers without touching a filesystem.
 
