@@ -34,6 +34,7 @@ from gbserver.api.builds import builds_api
 from gbserver.api.lineage import lineage_api
 from gbserver.api.logs import logs_api
 from gbserver.api.node_health import node_health_api
+from gbserver.api.openapi_security import enable_api
 from gbserver.api.secrets import secrets_api
 from gbserver.api.spaces import spaces_api
 from gbserver.types.constants import (
@@ -70,14 +71,25 @@ def read_root():
     }
 
 
-root_api.mount(f"{API_BASE_PATH}/auth", auth_api)
-root_api.mount(f"{API_BASE_PATH}/artifacts", artifacts_api)
-root_api.mount(f"{API_BASE_PATH}/builds", builds_api)
-root_api.mount(f"{API_BASE_PATH}/lineage", lineage_api)
-root_api.mount(f"{API_BASE_PATH}/logs", logs_api)
-root_api.mount(f"{API_BASE_PATH}/node-health", node_health_api)
-root_api.mount(f"{API_BASE_PATH}/secrets", secrets_api)
-root_api.mount(f"{API_BASE_PATH}/spaces", spaces_api)
+# Mount each sub-app and advertise the Bearer-token scheme on it, so its /docs
+# page shows an Authorize button that sends the header on "Try it out". This is
+# purely a docs/UI convenience — enforcement stays in AuthMiddleware.
+#
+# auth_api is mounted with advertise_auth=False: AuthMiddleware exempts the
+# entire /api/v1/auth/* login flow from authentication, so a lock icon there
+# would wrongly claim a token is required before the user has one.
+enable_api(root_api, f"{API_BASE_PATH}/auth", auth_api, advertise_auth=False)
+enable_api(root_api, f"{API_BASE_PATH}/artifacts", artifacts_api)
+enable_api(root_api, f"{API_BASE_PATH}/builds", builds_api)
+enable_api(root_api, f"{API_BASE_PATH}/lineage", lineage_api)
+enable_api(root_api, f"{API_BASE_PATH}/logs", logs_api)
+enable_api(root_api, f"{API_BASE_PATH}/node-health", node_health_api)
+enable_api(root_api, f"{API_BASE_PATH}/secrets", secrets_api)
+enable_api(root_api, f"{API_BASE_PATH}/spaces", spaces_api)
+
+# root_api is the top-level app (never mounted), so advertise the scheme on it
+# directly — no mount, just the Swagger auth wiring.
+enable_api(root_api)
 
 # ── Analytics (optional gb_ui_backend extra) ───────────────────────────────────
 # Included directly (not mounted as a separate ASGI app) so these routes run
