@@ -124,7 +124,7 @@ Three approaches for running custom code:
 
 ## See also
 
-- [Bash environment](../environments/bash.md) — how bash steps execute (inputs, config, outputs)
+- [bash environment](../environments/bash.md) — how bash steps execute (inputs, config, outputs)
 - [Templates](../templates/README.md) — reusable build.yaml patterns
 - [`build.yaml` reference](../builds/build-yaml-reference.md) — full schema
 - [`environment.yaml` reference](../environments/README.md) — environment definitions
