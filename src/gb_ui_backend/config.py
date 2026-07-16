@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from functools import lru_cache
 
@@ -25,11 +26,28 @@ class Config(BaseSettings):
     )
 
     # Analytics database — SQLite or PostgreSQL.
-    # Auto-set to sqlite+aiosqlite:///<GB_HOME_DIR>/dashboard-analytics.db by gbserver if unset.
+    # Auto-derived by gbserver (see derive_analytics_database_url in
+    # gbserver.types.constants) from the main store's own backend config when unset:
+    # GBSERVER_METADATA_STORAGE=sql inherits GBSERVER_SQL_* (translated to an asyncpg
+    # URL); GBSERVER_METADATA_STORAGE=sqlite defaults to its own SQLite file under
+    # GB_HOME_DIR (see ANALYTICS_DB_FILENAME).
     database_url: str = Field(
         default="",
-        description="SQLAlchemy async URL. Auto-configured by gbserver when running standalone.",
+        description="SQLAlchemy async URL. Auto-derived by gbserver from the main store's backend config when unset.",
     )
+
+    # Extra kwargs for create_async_engine(), JSON-encoded (e.g. {"ssl": ...} is built
+    # from this by _get_engine() — see db_schema.py). Only gbserver's
+    # _configure_analytics_env sets this (via GB_UI_DATABASE_CONNECT_ARGS), carrying
+    # the main SQL store's TLS cert path across the env-var boundary since an
+    # ssl.SSLContext object itself isn't JSON-serializable.
+    database_connect_args_json: str = Field(
+        default="{}", alias="GB_UI_DATABASE_CONNECT_ARGS"
+    )
+
+    @property
+    def database_connect_args(self) -> dict:
+        return json.loads(self.database_connect_args_json)
 
     # gbserver REST API
     gbserver_url: str = Field(default="http://localhost:8080")
