@@ -35,12 +35,19 @@ assetstores:
       - mode: default          # HF snapshot is downloaded and bind-mounted into the container.
     push:
       - mode: default
-  - store_uri: space://assetstores/local/
-    load:
-      - mode: default
+  # Local filesystem (file: URIs) — the builtin file store. Docker implements
+  # push only (pushasset_filestore); it has no pullasset_filestore, so declare
+  # push and NOT load — otherwise a file: input would resolve here and fail.
+  - store_uri: space://assetstores/file/
     push:
       - mode: default
 ```
+
+> `space://assetstores/file/` is the bundled builtin File store (resolved via the
+> builtins base_uri). Unlike `env://`/`mem://`, it is **not** auto-registered — an
+> environment declares it here with the modes it implements. Docker implements
+> `file:` **push** (outputs) only; it has no `pullasset_filestore`, so it does not
+> declare `load`.
 
 `config.defaults` holds environment-wide fallbacks (`image`, `env`). Most knobs are set per step.
 

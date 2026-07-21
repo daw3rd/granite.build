@@ -141,7 +141,7 @@ targets:
     steps:
       - step_uri: space://steps/train
         config:
-          bash_config:
+          command_config:
             command: "python train.py --reward-url {{ bindings.rm_url.binding.state }}"
 ```
 
@@ -214,10 +214,16 @@ environment, not on a fixed schema.
 
 | Field                    | Used by                  | Notes |
 |--------------------------|--------------------------|-------|
-| `num_nodes`              | k8s, lsf, skypilot, runpod | Number of nodes. |
-| `num_gpus_per_node`      | k8s, lsf, skypilot, runpod | GPUs per node. |
+| `num_nodes`              | k8s, lsf, runpod           | Number of nodes. |
+| `num_gpus_per_node`      | k8s, lsf, runpod           | GPUs per node. |
 | `num_cpus_per_node`      | docker, k8s, skypilot      | CPU cores per node. |
 | `total_memory_per_node`  | docker, k8s, skypilot      | Memory per node, e.g. `"4Gi"`, `"32Gi"`. |
+
+For **skypilot** the launch path consumes only `num_cpus_per_node` and
+`total_memory_per_node`, folding them into `sky.Resources` as a low-precedence
+floor (values under `launcher_config.resources` override them). GPU/accelerator
+selection and node count are supplied via `launcher_config.resources` on the step
+(e.g. `accelerators: "A100:8"`), not via `num_gpus_per_node`/`num_nodes`.
 
 Per-environment specifics (k8s `affinity`, skypilot `cluster`/`zone`, lsf
 `queue`, etc.) are documented in the per-type
@@ -305,7 +311,7 @@ These samples in the repo exercise the schema end to end:
 - [`samples/standalone/standalone-quickstart/build.yaml`](../../samples/standalone/standalone-quickstart/) — single target, multiple environment options, basic `compute_config`.
 - [`samples/templates/local_multi_stage/build.yaml`](../../samples/templates/local_multi_stage/) — four targets chained by binding, event-driven trigger.
 - [`samples/tests/digit-tuning-fmeval/build.yaml`](../../samples/tests/digit-tuning-fmeval/) — multi-GPU pipeline with templated Lakehouse URIs.
-- [`test-data/integration/standalone/buildrunner/local/retry/build.yaml`](../../test-data/integration/standalone/buildrunner/local/retry/) — top-level `retries` block with `max_retries`.
+- [`test-data/integration/standalone/buildrunner/bash/retry/build.yaml`](../../test-data/integration/standalone/buildrunner/bash/retry/) — top-level `retries` block with `max_retries`.
 
 ## Validation errors
 

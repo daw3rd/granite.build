@@ -26,12 +26,19 @@ assetstores:
   - store_uri: space://assetstores/hf/
     load:
       - mode: default
-  - store_uri: space://assetstores/local/
+  # Local filesystem (file: URIs) — the builtin file store. Bash implements both
+  # load and push (pullasset_filestore / pushasset_filestore).
+  - store_uri: space://assetstores/file/
     load:
       - mode: default
     push:
       - mode: default
 ```
+
+> `space://assetstores/file/` is the bundled builtin File store (resolved via the
+> builtins base_uri). Unlike `env://`/`mem://`, it is **not** auto-registered — an
+> environment declares it here with the modes it implements. Bash implements both
+> `load` and `push`.
 
 ## `step.yaml` — launcher and monitor types
 

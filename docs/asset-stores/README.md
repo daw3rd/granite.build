@@ -30,6 +30,14 @@ builds refer to them via `space://assetstores/<name>` URIs resolved through the 
 > [`Environment._register_default_envstore`](../../src/gbserver/environment/environment.py) /
 > [`_register_default_memstore`](../../src/gbserver/environment/environment.py).
 
+> **The File store (`file:`) is a declared store, not auto-registered.** Unlike `env://`/`mem://`, an
+> environment that supports `file:` declares it in its `environment.yaml` as
+> `space://assetstores/file/` — the bundled
+> [`builtins/assetstores/file`](../../src/gbserver/builtins/assetstores/file/store.yaml) store, resolved
+> via the builtins base_uri. Declare only the modes the backend actually implements (its
+> `pullasset_filestore` / `pushasset_filestore` methods): `bash` implements both `load` and `push`;
+> `docker` implements `push` only (no `pullasset_filestore`), so it declares `push` and not `load`.
+
 ## Store types and URI schemes
 
 | Store | URI scheme(s) | Maps a URI to… | Credentials (default secret name) |
