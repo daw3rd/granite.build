@@ -19,8 +19,9 @@
 import importlib.util
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
@@ -401,6 +402,95 @@ BUILD_FILES_STAT_BATCH_MAX = int(
     os.getenv(ENV_VAR_GBSERVER_BUILD_FILES_STAT_BATCH_MAX, "500")
 )
 
+# Environment-files REST API (GET /files/{environment}/{folder}/...). Browses a
+# named folder on the login nodes of a *supported environment*, authorized by
+# POSIX group membership. Reuses the same remote file-op machinery and caps as
+# the build-files API. SSH/login is the shared service identity resolved
+# per-request via open_lsf_tunnel (same as build-files); there is intentionally
+# no separate SSH/login config here.
+#
+# Only the caps enforced in the environment-files API *handlers* get an alias,
+# so each one can diverge from the build-files value by assigning it here:
+#   - DOWNLOAD_MAX_BYTES — download pre-flight size check
+#   - GREP_MAX_CONTEXT / PEEK_MAX_LINES — Query bounds on the endpoints
+# The other build-files caps (LIST_MAX_ENTRIES, GREP_MAX_HITS,
+# GREP_LINE_MAX_BYTES, PEEK_MAX_BYTES, STAT_BATCH_MAX) are enforced *inside* the
+# shared remote_files_ops module, which reads the BUILD_FILES_* originals
+# directly; both APIs get that one value and there is nothing here to tune. To
+# make one of those independently tunable, remote_files_ops would have to accept
+# it as a parameter instead of importing BUILD_FILES_* directly.
+ENV_FILES_DOWNLOAD_MAX_BYTES = BUILD_FILES_DOWNLOAD_MAX_BYTES
+ENV_FILES_GREP_MAX_CONTEXT = BUILD_FILES_GREP_MAX_CONTEXT
+ENV_FILES_PEEK_MAX_LINES = BUILD_FILES_PEEK_MAX_LINES
+
+# Max group members resolved per `getent passwd` round-trip when authorizing an
+# environment-files request. Members are looked up in chunks of this size so a
+# large proj_{folder} group can't build a command line that trips ARG_MAX / the
+# shell's arg limit on the login node (which would fail authz for a legitimate
+# member, surfacing as an undiagnosable uniform 404). 256 keeps each command
+# comfortably short while still batching the common case into one call.
+ENV_VAR_GBSERVER_ENV_FILES_GETENT_BATCH_MAX = (
+    ENV_VAR_PREFIX + "_ENV_FILES_GETENT_BATCH_MAX"
+)
+ENV_FILES_GETENT_BATCH_MAX = int(
+    os.getenv(ENV_VAR_GBSERVER_ENV_FILES_GETENT_BATCH_MAX, "256")
+)
+
+
+@dataclass(frozen=True)
+class EnvironmentFilesConfig:
+    """Per-environment config for the ``/files/{environment}`` API.
+
+    One record per *supported* environment. The set of records IS the set of
+    valid ``{environment}`` values — an environment absent from the registry is
+    unsupported and the API denies it with the same uniform 404 as a missing
+    folder (no leak of which environments exist).
+
+    Fields:
+      * ``gpfs_base`` — fixed base under which folders live on this
+        environment's login nodes; folder root = ``gpfs_base/{folder}``. Not
+        caller-supplied.
+      * ``space_name`` — space whose IBM Cloud Secret Manager holds the service
+        SSH key used to open the tunnel (server-resolved, never the requester).
+      * ``environment_uri`` — a ``space://…`` asset URI pointing at the LSF
+        ``environment.yaml`` whose login nodes mount ``gpfs_base``. This is the
+        one value that differs per deployment (dev/staging/prod) and cannot be
+        inferred from code; it MUST be set for the environment to function. An
+        empty value means "known environment, not configured for this
+        deployment" → the endpoints return 503 rather than guess.
+    """
+
+    gpfs_base: str
+    space_name: str
+    environment_uri: str
+
+
+# Registry of supported environments for the files API. Adding a new supported
+# environment is a data change here, not new code. Today the only working
+# environment is `bluevela` (LSF login nodes mounting /proj), preserving the
+# behavior the API shipped with.
+#
+# The env vars carry the module-wide GBSERVER_ prefix (ENV_VAR_PREFIX), i.e.
+# GBSERVER_BLUEVELA_FILES_SPACE_NAME / GBSERVER_BLUEVELA_FILES_ENVIRONMENT_URI —
+# NOT a bare GB_ prefix.
+# GBSERVER_BLUEVELA_FILES_SPACE_NAME: defaults to the public space (literal
+#   "public"; the PUBLIC_SPACE_NAME constant is defined further down this file).
+# GBSERVER_BLUEVELA_FILES_ENVIRONMENT_URI: empty default → bluevela is a known
+#   environment but "not configured" on this deployment (503, not a guess).
+ENV_VAR_GBSERVER_BLUEVELA_FILES_SPACE_NAME = (
+    ENV_VAR_PREFIX + "_BLUEVELA_FILES_SPACE_NAME"
+)
+ENV_VAR_GBSERVER_BLUEVELA_FILES_ENVIRONMENT_URI = (
+    ENV_VAR_PREFIX + "_BLUEVELA_FILES_ENVIRONMENT_URI"
+)
+ENVIRONMENT_FILES_REGISTRY: Dict[str, EnvironmentFilesConfig] = {
+    "bluevela": EnvironmentFilesConfig(
+        gpfs_base="/proj",
+        space_name=os.getenv(ENV_VAR_GBSERVER_BLUEVELA_FILES_SPACE_NAME, "public"),
+        environment_uri=os.getenv(ENV_VAR_GBSERVER_BLUEVELA_FILES_ENVIRONMENT_URI, ""),
+    ),
+}
+
 ENV_VAR_GBSERVER_DEFAULT_GH_REQUEST_TIMEOUT = (
     ENV_VAR_PREFIX + "_DEFAULT_GH_REQUEST_TIMEOUT"
 )
@@ -442,8 +532,8 @@ GBSERVER_TRUNCATE_LENGTH = int(os.getenv(ENV_VAR_TRUNCATE_LENGTH, "-1"), base=10
 # Cap on simultaneous SkyPilot cluster bring-ups. Each launch opens a fresh
 # SSH session to the cloud's login node; LSF-backed clouds in particular
 # trip MaxAuthTries on sshd when many evals fan out at once. Default 4 is
-# safe for BlueVela; override to a higher value on clouds that don't
-# bottleneck on SSH (e.g. Kubernetes).
+# safe for SSH-bottlenecked clusters; override to a higher value on clouds
+# that don't bottleneck on SSH (e.g. Kubernetes).
 GBSERVER_SKYPILOT_LAUNCH_CONCURRENCY = int(
     os.getenv(ENV_VAR_SKYPILOT_LAUNCH_CONCURRENCY, "4"), base=10
 )
