@@ -17,11 +17,11 @@
 These tests use an in-memory stub admin storage and a stub lineage store, so
 they run in CI without a cluster, PostgreSQL, or wandb credentials. They verify
 that reconciliation selects successful targets from the admin DB by a
-``finished_at`` time watermark and records each through the single leaf, that a
-full catch-up (no watermark) recovers targets that appeared while the recorder
-was down (no restart blind spot), that steady-state scans read only newly-
-finished targets, and that the per-sink ``filter_unrecorded`` check decides what
-each sink actually records.
+``finished_at`` time watermark and records each through the single leaf, that the
+watermark is required (a full-history backfill must be asked for explicitly, with
+``datetime.min``, rather than being what an omitted argument means), that
+steady-state scans read only newly-finished targets, and that the per-sink
+``filter_unrecorded`` check decides what each sink actually records.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -29,6 +29,7 @@ from unittest.mock import MagicMock
 
 from gbserver.lineage.lineage_reconciler import (
     _expected_run_count,
+    get_most_recent_successful_target,
     reconcile_once,
     record_selected_targets,
     record_target_lineage,
@@ -142,7 +143,7 @@ class TestSelectRecordableTargets:
                 _target("b1", "t2", Status.SUCCESS, _BASE + timedelta(seconds=1)),
             ]
         )
-        selected = select_recordable_targets(storage)
+        selected = select_recordable_targets(storage, finished_after=_BASE)
         assert {t.uuid for t in selected} == {"t1", "t2"}
 
     def test_watermark_selects_only_newly_finished(self):
@@ -196,6 +197,59 @@ class TestSelectRecordableTargets:
         selected = select_recordable_targets(storage, finished_after=_BASE)
         assert {t.uuid for t in selected} == {"t_aware"}
 
+    def test_overflowing_aware_finished_at_does_not_abort_scan(self):
+        # The --base-build-id all anchor is datetime.min itself, and a backend may
+        # hand it back aware with a positive UTC offset. Shifting that to UTC overflows
+        # datetime.min, which would raise OverflowError out of the whole scan
+        # (through reconcile_once and start()) rather than merely comparing wrong.
+        # It must be clamped to the bound instead, leaving the walk intact.
+        overflowing = datetime.min.replace(tzinfo=timezone(timedelta(hours=5)))
+        t_min = _target("b1", "t_min", finished_at=overflowing)
+        t_new = _target("b1", "t_new", finished_at=_BASE + timedelta(seconds=10))
+        storage = _admin_storage_returning([[t_new, t_min]])
+
+        selected = select_recordable_targets(storage, finished_after=_BASE)
+        # t_min clamps to datetime.min, which is older than the watermark, so it
+        # ends the walk — but t_new, read before it, is still selected.
+        assert {t.uuid for t in selected} == {"t_new"}
+
+    def test_overflowing_aware_watermark_does_not_abort_scan(self):
+        # Same overflow on the cutoff side: a datetime.min watermark read back
+        # aware must clamp to datetime.min (selecting everything, per
+        # --base-build-id all) rather than raising out of the scan.
+        cutoff = datetime.min.replace(tzinfo=timezone(timedelta(hours=5)))
+        t1 = _target("b1", "t1", finished_at=_BASE)
+        storage = _admin_storage_with([t1])
+
+        selected = select_recordable_targets(storage, finished_after=cutoff)
+        assert {t.uuid for t in selected} == {"t1"}
+
+
+class TestGetMostRecentSuccessfulTarget:
+    """Seeding anchor lookup — must survive a pre-``finished_at`` NULL backlog."""
+
+    def test_pages_past_a_full_first_page_of_nulls(self):
+        # finished_at stamping was added after rows already existed, so real
+        # deployments hold SUCCESS targets with finished_at NULL — and PostgreSQL
+        # sorts NULLs FIRST under DESC (the sort is a bare desc(), no NULLS LAST).
+        # Reading only page 0 would return None here, making `--base-build-id`
+        # raise LineageSeedError on exactly the deployments that have history to
+        # anchor against — a crashloop, since --base-build-id is meant to stay in
+        # the pod spec.
+        nulls = [_target("b1", f"t_null_{i}") for i in range(_SCAN_PAGE_SIZE)]
+        anchor = _target("b2", "t_anchor", finished_at=_BASE)
+        storage = _admin_storage_returning([nulls, [anchor]])
+
+        found = get_most_recent_successful_target(storage)
+        assert found is not None and found.uuid == "t_anchor"
+
+    def test_stops_at_a_short_page_of_nulls(self):
+        # A short page is the last one: no non-NULL row exists, so this must
+        # return None rather than paging forever.
+        storage = _admin_storage_returning([[_target("b1", "t_null")]])
+        assert get_most_recent_successful_target(storage) is None
+        assert storage.target_storage.get_by_where.call_count == 1
+
 
 class TestRecordTargetLineage:
     def test_leaf_calls_store_with_ids(self):
@@ -217,10 +271,11 @@ class TestReconcileOnce:
             ]
         )
 
-        watermark = reconcile_once(store, storage)
+        recorded = reconcile_once(store, storage, finished_after=_BASE)
 
-        assert {c[1] for c in store.recorded_calls} == {"t1", "t2"}
-        assert watermark == _BASE + timedelta(seconds=1)
+        assert recorded == 2
+        # Recorded oldest-finished-first.
+        assert [c[1] for c in store.recorded_calls] == ["t1", "t2"]
 
     def test_already_recorded_targets_are_skipped(self):
         store = _StubStore(already_recorded={"t1"})
@@ -231,31 +286,18 @@ class TestReconcileOnce:
             ]
         )
 
-        reconcile_once(store, storage)
+        reconcile_once(store, storage, finished_after=_BASE)
 
         # Only the not-yet-recorded target is recorded this pass.
         assert store.recorded_calls == [("b1", "t2")]
 
-    def test_full_catch_up_recovers_targets_seen_while_down(self):
-        """A scan with no watermark records everything in the DB.
+    def test_backfill_pages_through_all_targets(self):
+        """``datetime.min`` is the deliberate full-history backfill.
 
-        This is the restart-blind-spot fix: a target that succeeded while the
-        recorder was down is present in the admin DB and picked up on the next
-        scan, with no event replay required.
+        There is no longer an implicit "no watermark" mode — a caller that wants
+        every successful target ever must ask for it — and the walk must page
+        past the first page to deliver it.
         """
-        store = _StubStore()
-        storage = _admin_storage_with(
-            [
-                _target("b1", "t1", finished_at=_BASE),
-                _target("b2", "t2", finished_at=_BASE + timedelta(seconds=1)),
-            ]
-        )
-
-        reconcile_once(store, storage, finished_after=None)
-
-        assert {c[1] for c in store.recorded_calls} == {"t1", "t2"}
-
-    def test_full_catch_up_pages_through_all_targets(self):
         store = _StubStore()
         targets = [
             _target("b1", f"t{i}", finished_at=_BASE + timedelta(seconds=i))
@@ -263,7 +305,7 @@ class TestReconcileOnce:
         ]
         storage = _admin_storage_with(targets)
 
-        reconcile_once(store, storage, finished_after=None)
+        reconcile_once(store, storage, finished_after=datetime.min)
         assert {c[1] for c in store.recorded_calls} == {t.uuid for t in targets}
 
     def test_steady_state_stops_at_watermark(self):
@@ -298,14 +340,14 @@ class TestReconcileOnce:
             ]
         )
 
-        reconcile_once(store, storage)
+        reconcile_once(store, storage, finished_after=_BASE)
         # Scan continued past the failure and recorded t2.
         assert ("b1", "t2") in store.recorded_calls
         assert ("b1", "t1") not in store.recorded_calls
 
         # Next scan: t1 no longer fails and is retried (still unrecorded).
         store._fail = set()
-        reconcile_once(store, storage)
+        reconcile_once(store, storage, finished_after=_BASE)
         assert ("b1", "t1") in store.recorded_calls
 
     def test_on_error_callback_invoked_on_failure(self):
@@ -316,25 +358,86 @@ class TestReconcileOnce:
         reconcile_once(
             store,
             storage,
+            finished_after=_BASE,
             on_error=lambda b, t, e: errors.append((b, t, str(e))),
         )
 
         assert ("b1", "t1") not in store.recorded_calls
         assert errors == [("b1", "t1", "boom")]
 
-    def test_skip_set_excludes_targets_but_advances_watermark(self):
+    def test_skip_set_excludes_targets_and_does_not_advance_watermark(self):
         store = _StubStore()
         t1 = _target("b1", "t1", finished_at=_BASE)
         t2 = _target("b1", "t2", finished_at=_BASE + timedelta(seconds=5))
         storage = _admin_storage_with([t1, t2])
 
-        watermark = reconcile_once(store, storage, skip={"t2"})
+        advances = []
+        reconcile_once(
+            store,
+            storage,
+            finished_after=_BASE,
+            skip={"t2"},
+            on_checkpoint_advance=lambda build_id, finished_at: advances.append(
+                (build_id, finished_at)
+            ),
+        )
 
         # t2 is skipped (dropped), t1 still recorded.
         assert store.recorded_calls == [("b1", "t1")]
-        # Watermark still advances past the skipped target so it is not
-        # reconsidered forever.
-        assert watermark == _BASE + timedelta(seconds=5)
+        # The checkpoint only advances over the actually-recorded target; a
+        # skipped target must not carry it past t1.
+        assert advances == [("b1", _BASE)]
+
+    def test_on_checkpoint_advance_fires_per_target_oldest_first(self):
+        store = _StubStore()
+        t1 = _target("b1", "t1", finished_at=_BASE)
+        t2 = _target("b2", "t2", finished_at=_BASE + timedelta(seconds=5))
+        storage = _admin_storage_with([t1, t2])
+        advances = []
+
+        reconcile_once(
+            store,
+            storage,
+            finished_after=_BASE,
+            on_checkpoint_advance=lambda build_id, finished_at: advances.append(
+                (build_id, finished_at)
+            ),
+        )
+
+        assert advances == [
+            ("b1", _BASE),
+            ("b2", _BASE + timedelta(seconds=5)),
+        ]
+
+    def test_on_checkpoint_advance_stops_at_failed_target(self):
+        """The checkpoint must not advance past a target that failed to record.
+
+        t2 fails while t3 (newer) still records — a failure does not abort the
+        scan. But the checkpoint may only cover the *contiguous* oldest-first run
+        of recorded targets: advancing to t3 would durably move the watermark
+        past t2's unrecorded lineage, so the next scan would not re-surface t2 and
+        a restart (retry state is in-memory only) would drop it permanently.
+        """
+        store = _StubStore(fail={"t2"})
+        t1 = _target("b1", "t1", finished_at=_BASE)
+        t2 = _target("b1", "t2", finished_at=_BASE + timedelta(seconds=5))
+        t3 = _target("b1", "t3", finished_at=_BASE + timedelta(seconds=10))
+        storage = _admin_storage_with([t1, t2, t3])
+        advances = []
+
+        reconcile_once(
+            store,
+            storage,
+            finished_after=_BASE,
+            on_checkpoint_advance=lambda build_id, finished_at: advances.append(
+                (build_id, finished_at)
+            ),
+        )
+
+        # t3 is still recorded (the scan does not abort)...
+        assert ("b1", "t3") in store.recorded_calls
+        # ...but the checkpoint stops at t1, the last target before the failure.
+        assert advances == [("b1", _BASE)]
 
     def test_passes_expected_run_counts_derived_from_outputs(self):
         store = _StubStore()
@@ -349,7 +452,7 @@ class TestReconcileOnce:
         t2 = _target("b1", "t2", finished_at=_BASE + timedelta(seconds=1))
         storage = _admin_storage_with([t1, t2])
 
-        reconcile_once(store, storage)
+        reconcile_once(store, storage, finished_after=_BASE)
 
         assert store.last_expected_counts == {"t1": 3, "t2": 1}
 
@@ -367,7 +470,7 @@ class TestReconcileOnce:
         )
         storage = _admin_storage_with([t1])
 
-        reconcile_once(store, storage)
+        reconcile_once(store, storage, finished_after=_BASE)
 
         assert store.last_expected_counts == {}
 
