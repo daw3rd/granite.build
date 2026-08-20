@@ -393,6 +393,44 @@ def _remap_relative_dest(dst: str, build_workdir: Optional[str]) -> str:
     return os.path.normpath(os.path.join(build_workdir, dst))
 
 
+def _get_cli_prefix(build_workdir: Optional[str]) -> str:
+    """Build the shell snippet prepended to each step's setup and run scripts.
+
+    The snippet always leads with ``set -eu`` so any failure in the prefix aborts
+    before the step body runs, rather than silently executing the body in a wrong
+    or unexpected state. The prefix is prepended ahead of each body's own
+    ``set -eu``, so without this the body's flags would not yet be in effect while
+    the prefix runs.
+
+    When a ``build_workdir`` was provisioned (the env configures
+    ``shared_workdir``), the snippet also emits ``mkdir -p`` + ``cd
+    "$GB_BUILD_WORKDIR"`` so both the ``setup`` and ``run`` scripts start in that
+    per-run workdir. Making the launcher own the ``cd`` lets step authors write
+    outputs with relative paths and stay agnostic about where the step runs: they
+    never need to reference ``$GB_BUILD_WORKDIR`` themselves. With ``set -eu`` in
+    front, a failing ``mkdir``/``cd`` (or an unset ``$GB_BUILD_WORKDIR``) aborts
+    fast instead of leaving the body running in the wrong directory.
+
+    When no ``build_workdir`` is set (envs without ``shared_workdir``), no ``cd``
+    is emitted — only ``set -eu``. SkyPilot then runs the scripts in its own
+    default working directory (``~/sky_workdir``), which is exactly where its
+    relative ``file_mounts`` rewrite places payloads (see ``_remap_relative_dest``,
+    which leaves relative destinations untouched in this case). Injecting a ``cd``
+    elsewhere (e.g. ``$HOME``) would move the CWD away from the mounted payloads,
+    so relative-in/relative-out steps would fail to find them; not cd'ing keeps
+    the run CWD aligned with the mount location.
+
+    :param build_workdir: the provisioned per-run workdir path, or ``None`` when
+        no ``shared_workdir`` is configured (no ``cd`` is emitted).
+    :returns: a shell snippet terminated by a trailing newline; always at least
+        ``set -eu``, plus ``mkdir``/``cd`` when a ``build_workdir`` is set.
+    """
+    prefix = "set -eu\n"
+    if build_workdir:
+        prefix += 'mkdir -p "$GB_BUILD_WORKDIR"\ncd "$GB_BUILD_WORKDIR"\n'
+    return prefix
+
+
 def _build_skypilot_mounts(
     file_mounts_raw: dict,
     asset_dir: Union[Path, str, None],
@@ -1012,13 +1050,18 @@ class Skypilot(Environment):
                     build_workdir,
                 )
 
-            run_script = launcher_config.get("run", "")
-            if build_workdir:
-                run_script = (
-                    'mkdir -p "$GB_BUILD_WORKDIR"\n'
-                    'cd "$GB_BUILD_WORKDIR"\n'
-                    f"{run_script}"
-                )
+            # The prefix always leads with `set -eu` (fail fast). When a per-run
+            # workdir was provisioned, it also prepends a `cd` into it to both
+            # setup and run so step scripts start in a known directory and can use
+            # relative paths without referencing $GB_BUILD_WORKDIR. With no
+            # shared_workdir, _get_cli_prefix emits only `set -eu` (no cd), so the
+            # scripts stay in SkyPilot's default ~/sky_workdir, where relative
+            # file_mounts land. Only prefix setup when there is a setup script, so
+            # steps without one don't acquire a spurious setup phase.
+            cli_prefix = _get_cli_prefix(build_workdir)
+            run_script = cli_prefix + launcher_config.get("run", "")
+            if setup_script:
+                setup_script = cli_prefix + setup_script
 
             # Build sky.Task
             task = sky.Task(
