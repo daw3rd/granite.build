@@ -37,8 +37,10 @@ import pytest
 from gbserver.lineage.lineage_reconciler import (
     LINEAGE_WATCHER_CHECKPOINT_KEY,
     LINEAGE_WATCHER_DROPPED_KEY,
+    LINEAGE_WATCHER_INCOMPLETE_KEY,
 )
 from gbserver.lineage.lineage_watcher import LineageWatcher
+from gbserver.storage.stored_build import StoredBuild
 from gbserver.storage.stored_target_run import StoredTargetRun
 from gbserver.types.status import Status
 
@@ -74,7 +76,9 @@ class _StubStore:
         self.calls.append((build_id, target_id))
         self._recorded.add(target_id)
 
-    def filter_unrecorded(self, target_ids: set, expected_counts=None) -> set:
+    def filter_unrecorded(
+        self, target_ids: set, expected_counts=None, on_query_error=None
+    ) -> set:
         return set(target_ids) - self._recorded
 
 
@@ -225,6 +229,357 @@ class TestLineageWatcher:
         watcher._reconcile()
 
         assert "t_b" in {c[1] for c in store.calls}
+
+    def test_history_behind_the_anchor_build_is_not_selected(self):
+        """The reported bug: an anchored scan must not reach unrelated history.
+
+        The anchor is the checkpoint build's *oldest* target, and the walk filters
+        on status alone, so before the allowlist a scan anchored at a recent build
+        selected every successful target finished after that anchor — on a real
+        deployment, months of unrelated builds (441 candidates reaching back ~10
+        months). They were masked whenever the sink answered "already recorded",
+        and became a re-record storm the moment it timed out.
+
+        Here `old-build` finished long before the anchor build and is not tracked,
+        so it must not be selected at all.
+        """
+        self._targets = [
+            _target("old-build", "t_old", _BASE - timedelta(days=300)),
+            _target("build-c", "t_c", _BASE),
+        ]
+        watcher, store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+
+        watcher._reconcile()
+
+        recorded = {c[1] for c in store.calls}
+        assert "t_c" in recorded
+        assert "t_old" not in recorded
+
+    def test_sink_failure_does_not_retire_a_finished_build(self):
+        """An unanswered sink query must never confirm a build as recorded.
+
+        ``filter_unrecorded`` fails open — on error it returns every candidate,
+        which is indistinguishable from "none are recorded". Retirement is
+        irreversible for the process, so it must act only on a real answer: a
+        failing sink has to leave the build in the allowlist.
+        """
+        self._targets = [_target("build-c", "t_c", _BASE)]
+        watcher, store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowed_build_ids = {"build-c"}
+        watcher._allowlist_seeded = True
+
+        def _failing(target_ids, expected_counts=None, on_query_error=None):
+            if on_query_error is not None:
+                on_query_error(RuntimeError("wandb read timed out"))
+            return set(target_ids)
+
+        store.filter_unrecorded = _failing
+
+        watcher._retire_finished_builds(self.storage)
+
+        assert "build-c" in watcher._allowed_build_ids
+
+    def test_retirement_failure_does_not_abort_the_scan(self):
+        """A storage error during retirement must not break a completed scan.
+
+        Retirement runs *after* the pass has already recorded, and is only a
+        memory optimization: letting an error escape would abort a scan whose real
+        work is done. The build stays in the allowlist ("not confirmed") and the
+        scan still reports its recording as successful.
+        """
+        self._targets = [_target("build-c", "t_c", _BASE)]
+        watcher, store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowed_build_ids = {"build-c"}
+        watcher._allowlist_seeded = True
+
+        # A real finished build, so retirement gets past the build-status check and
+        # reaches the target re-selection below — the path that was unguarded.
+        self.storage.build_storage.get_by_uuid = lambda _uuid: StoredBuild(
+            uuid="build-c",
+            name="c",
+            space_name="s",
+            source_uri="file://x",
+            username="u",
+            status=Status.SUCCESS,
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("storage is down")
+
+        self.storage.target_storage.get_by_where.side_effect = _boom
+
+        # Must not raise.
+        watcher._retire_finished_builds(self.storage)
+
+        assert "build-c" in watcher._allowed_build_ids
+
+    def test_admission_is_bounded_by_the_anchor_not_full_history(self):
+        """Admission must stop at the anchor row, not page the whole table.
+
+        ``_admit_builds_in_anchored_range`` passes ``finished_after=UTC_MIN``,
+        which on its own would mean "no lower bound" — a full historical read.
+        The actual bound is ``stop_at``, which takes over when given (see
+        ``select_recordable_targets``). This pins that: a build far behind the
+        anchor must not be admitted, however many scans run.
+
+        Asserted on the observable effect rather than on the call arguments, so
+        it stays true if the bound is expressed some other way.
+        """
+        self._targets = [
+            _target("ancient-build", "t_ancient", _BASE - timedelta(days=300)),
+            _target("build-c", "t_c", _BASE),
+        ]
+        watcher, _store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowlist_seeded = True
+        watcher._allowed_build_ids = {"build-c"}
+
+        watcher._admit_builds_in_anchored_range(self.storage, ("build-c", _BASE))
+
+        # Behind the anchor, so the walk must never have reached it.
+        assert "ancient-build" not in watcher._allowed_build_ids
+
+    def test_admission_admits_a_build_that_finished_inside_the_anchor(self):
+        """The other half of the bound: in-range builds must still be admitted.
+
+        Guards against "fixing" the bound by narrowing it into uselessness — a
+        concurrent build that finished inside the anchored range is exactly what
+        this method exists to catch, since it is already finished by the time
+        ``_refresh_allowed_builds`` looks at build rows.
+        """
+        self._targets = [
+            _target("concurrent-build", "t_conc", _BASE + timedelta(seconds=5)),
+            _target("build-c", "t_c", _BASE),
+        ]
+        watcher, _store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowlist_seeded = True
+        watcher._allowed_build_ids = {"build-c"}
+
+        watcher._admit_builds_in_anchored_range(self.storage, ("build-c", _BASE))
+
+        assert "concurrent-build" in watcher._allowed_build_ids
+
+    def test_retired_build_is_not_re_admitted_from_the_anchored_range(self):
+        """Retirement must survive the next scan's admission pass.
+
+        ``_admit_builds_in_anchored_range`` admits from the *swept range* rather
+        than from build state, so it never sees the finished-build check that
+        keeps ``_refresh_allowed_builds`` from re-adding a retired build. Its
+        guard originally tested ``t.uuid not in self._dropped`` — a target uuid
+        against the dropped-*targets* set, which never holds build ids — so the
+        guard could not fire and a retired build whose targets still sat inside
+        the anchor was re-admitted on every scan, undoing retirement.
+        """
+        self._targets = [_target("build-c", "t_c", _BASE)]
+        watcher, _store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowlist_seeded = True
+        # Retired on an earlier scan: gone from the allowlist, recorded as retired.
+        watcher._allowed_build_ids = set()
+        watcher._retired_build_ids = {"build-c"}
+
+        # The anchor still spans build-c's target, so admission sees it.
+        watcher._admit_builds_in_anchored_range(self.storage, ("build-c", _BASE))
+
+        assert "build-c" not in watcher._allowed_build_ids
+
+    def test_refresh_queries_only_live_builds_server_side(self):
+        """The refresh must not read every build row to find the live ones.
+
+        ``get_by_where({})`` returns all builds ever, every scan, deserializing
+        months of history to find the few new-and-unfinished ones — partly
+        reinstating the full-table read the allowlist exists to avoid.
+
+        The stored form matters: ``BuildStorage._get_column_values`` persists
+        ``status.name`` (upper case) while ``Status`` is a ``StrEnum`` with lower-case
+        values, so querying with the members themselves silently matches nothing,
+        empties the allowlist and stops lineage for every new build.
+        """
+        watcher, _store = self._make_watcher()
+        watcher._allowlist_seeded = True
+        running = StoredBuild(
+            name="live", space_name="sp", source_uri="https://x", username="u"
+        )
+        running.status = Status.RUNNING
+        done = StoredBuild(
+            name="done", space_name="sp", source_uri="https://x", username="u"
+        )
+        done.status = Status.SUCCESS
+        self.storage.build_storage.get_by_where = MagicMock(
+            return_value=[running, done]
+        )
+
+        watcher._refresh_allowed_builds(self.storage)
+
+        (where,), _kwargs = self.storage.build_storage.get_by_where.call_args
+        assert where != {}, "the refresh must filter server-side, not read every row"
+        assert set(where) == {"status"}
+        # Exactly the complement of is_finished(), in the stored upper-case form.
+        assert set(where["status"]) == {s.name for s in Status if not s.is_finished()}
+        assert all(name.isupper() for name in where["status"])
+        # The filter must not cost the additions the refresh exists to make, and a
+        # build that finished between the query and the loop is still kept out.
+        assert running.uuid in watcher._allowed_build_ids
+        assert done.uuid not in watcher._allowed_build_ids
+
+    def test_retirement_records_the_build_as_retired(self):
+        """Retiring a build must mark it, not just drop it from the allowlist.
+
+        Discarding alone leaves nothing for admission to test against, which is
+        what let a retired build return on the next scan.
+        """
+        self._targets = [_target("build-c", "t_c", _BASE)]
+        watcher, store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowed_build_ids = {"build-c"}
+        watcher._allowlist_seeded = True
+
+        self.storage.build_storage.get_by_uuid = lambda _uuid: StoredBuild(
+            uuid="build-c",
+            name="c",
+            space_name="s",
+            source_uri="file://x",
+            username="u",
+            status=Status.SUCCESS,
+        )
+        # Nothing unrecorded left in the sink, so its lineage is confirmed.
+        store.filter_unrecorded = (
+            lambda target_ids, expected_counts=None, on_query_error=None: set()
+        )
+
+        watcher._retire_finished_builds(self.storage)
+
+        assert "build-c" not in watcher._allowed_build_ids
+        assert "build-c" in watcher._retired_build_ids
+
+    def _finished_build(self, build_id: str = "build-c") -> None:
+        """Make ``build_id`` read as a real finished build, so retirement gets
+        past the build-status check and reaches the confirmation path."""
+        self.storage.build_storage.get_by_uuid = lambda _uuid: StoredBuild(
+            uuid=build_id,
+            name="c",
+            space_name="s",
+            source_uri="file://x",
+            username="u",
+            status=Status.SUCCESS,
+        )
+
+    def test_retiring_with_dropped_targets_records_the_incomplete_build(self):
+        """A build retired with dropped lineage must leave a durable record.
+
+        Retiring it is deliberate: a run deleted from wandb cannot be regenerated,
+        so retaining the build would pin it forever for lineage that can never
+        land. But "confirmed" then covers *dropped* as well as *recorded*, so
+        without this key the build would look complete while its lineage is
+        absent — and the ERROR line explaining why rotates away.
+        """
+        self._targets = [_target("build-c", "t_c", _BASE)]
+        watcher, store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowed_build_ids = {"build-c"}
+        watcher._allowlist_seeded = True
+        # t_c was permanently rejected by the sink (deleted run), so it is dropped
+        # and never recorded — the whole build's lineage is therefore missing.
+        watcher._dropped = {"t_c"}
+        self._finished_build()
+        store.filter_unrecorded = (
+            lambda target_ids, expected_counts=None, on_query_error=None: set()
+        )
+
+        watcher._retire_finished_builds(self.storage)
+
+        assert "build-c" not in watcher._allowed_build_ids
+        recorded = self.storage.kv_pair_storage.get_value(
+            LINEAGE_WATCHER_INCOMPLETE_KEY
+        )
+        assert recorded["builds"]["build-c"]["target_ids"] == ["t_c"]
+        assert "retired_at" in recorded["builds"]["build-c"]
+
+    def test_retiring_a_fully_recorded_build_records_nothing_incomplete(self):
+        """The key must stay empty for the normal case.
+
+        Otherwise every retirement would look like a lineage gap and the record
+        would be useless for the question it exists to answer.
+        """
+        self._targets = [_target("build-c", "t_c", _BASE)]
+        watcher, store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowed_build_ids = {"build-c"}
+        watcher._allowlist_seeded = True
+        self._finished_build()
+        # Nothing dropped, and the sink confirms the target landed.
+        store.filter_unrecorded = (
+            lambda target_ids, expected_counts=None, on_query_error=None: set()
+        )
+
+        watcher._retire_finished_builds(self.storage)
+
+        assert "build-c" not in watcher._allowed_build_ids
+        assert (
+            self.storage.kv_pair_storage.get_value(LINEAGE_WATCHER_INCOMPLETE_KEY)
+            is None
+        )
+
+    def test_incomplete_record_accumulates_across_builds(self):
+        """Recording one build must not overwrite an earlier one.
+
+        The value is a single key holding a map, so this is a read-modify-write;
+        clobbering would silently lose every prior gap.
+        """
+        watcher, _store = self._make_watcher()
+        self.storage.kv_pair_storage.set_value(
+            LINEAGE_WATCHER_INCOMPLETE_KEY,
+            {"builds": {"older-build": {"target_ids": ["t_old"], "retired_at": "x"}}},
+        )
+
+        watcher._record_incomplete_build(self.storage, "build-c", {"t_c"})
+
+        builds = self.storage.kv_pair_storage.get_value(LINEAGE_WATCHER_INCOMPLETE_KEY)[
+            "builds"
+        ]
+        assert set(builds) == {"older-build", "build-c"}
+
+    def test_incomplete_record_failure_does_not_block_retirement(self):
+        """A failing audit write must not abort retirement or the scan.
+
+        Retirement runs after the pass has already recorded; losing the audit
+        entry is worse than nothing but far better than aborting a completed scan
+        (the ERROR line from the original drop still stands).
+        """
+        self._targets = [_target("build-c", "t_c", _BASE)]
+        watcher, store = self._make_watcher()
+        _seed(self.storage, "build-c", _BASE)
+        watcher._checkpoint_verified = True
+        watcher._allowed_build_ids = {"build-c"}
+        watcher._allowlist_seeded = True
+        watcher._dropped = {"t_c"}
+        self._finished_build()
+        store.filter_unrecorded = (
+            lambda target_ids, expected_counts=None, on_query_error=None: set()
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("kv store is down")
+
+        self.storage.kv_pair_storage.set_value = _boom
+
+        # Must not raise, and must still retire.
+        watcher._retire_finished_builds(self.storage)
+
+        assert "build-c" not in watcher._allowed_build_ids
 
     def test_staggered_targets_within_checkpoint_build_are_not_lost(self):
         """The checkpoint's build keeps its own earlier targets in scope.
@@ -477,6 +832,60 @@ class TestLineageWatcher:
         assert watcher._failed_attempts == {}
         # Dropped target is in the skip set so it stops wedging every scan.
         assert "target-p" in watcher._dropped
+
+    def test_deleted_run_is_dropped_without_retrying(self):
+        """A run id the sink deleted is unrecoverable, so it must not be retried.
+
+        wandb remembers a deleted run id and refuses it permanently. Run ids are
+        deterministic, so there is no new id to try: every retry is a guaranteed
+        failure that also pins the checkpoint at this target. It must drop on the
+        first sighting, not after the full attempt budget.
+        """
+        self._targets = [_target("build-d", "target-d", _BASE)]
+        watcher, store = self._make_watcher()
+        deleted_msg = (
+            "run 552f5de9-c0da-4bed-961d-d5b2624035d6-99237962-f197-469c-91c1-"
+            "e8c529bf9c5c was previously created and deleted; try a new run id"
+        )
+
+        def _raise_deleted(_storage, build_id, target_id):
+            raise RuntimeError(deleted_msg)
+
+        store.add_jobstats_for_build_target = _raise_deleted
+
+        watcher._reconcile()
+
+        # Dropped on the very first failure, with no retry budget spent.
+        assert "target-d" in watcher._dropped
+        assert watcher._failed_attempts == {}
+        assert self.storage.kv_pair_storage.get_value(LINEAGE_WATCHER_DROPPED_KEY) == {
+            "target_ids": ["target-d"]
+        }
+
+    def test_deleted_run_is_detected_through_a_wrapped_exception(self):
+        """The rejection still counts when it arrives wrapped by another error.
+
+        The store re-raises from its own handlers, so the rejection can reach the
+        watcher as a ``__cause__``/``__context__`` rather than as the outermost
+        exception. Checking only the outer one would spend the whole retry budget.
+        """
+        inner = RuntimeError("run abc-def was previously created and deleted")
+        outer = RuntimeError("Failed to process lineage event")
+        outer.__cause__ = inner
+
+        assert LineageWatcher._is_permanent_sink_rejection(outer) is True
+
+    def test_transient_failure_still_gets_its_full_retry_budget(self):
+        """The drop-immediate path must not swallow ordinary retryable failures.
+
+        wandb raises the same exception type for transient network trouble, so a
+        false positive here would discard recoverable lineage without retrying.
+        """
+        exc = RuntimeError(
+            "HTTPSConnectionPool(...): Read timed out. (read timeout=19)"
+        )
+
+        assert LineageWatcher._is_permanent_sink_rejection(exc) is False
 
     def test_dropped_target_survives_restart_and_unblocks_checkpoint(self):
         """A permanently-dropped target must not come back after a restart.
