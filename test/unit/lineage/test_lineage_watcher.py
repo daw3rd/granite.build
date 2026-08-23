@@ -346,6 +346,47 @@ class TestLineageWatcher:
         watcher._reconcile()
         assert self._checkpoint_build() == "B"
 
+    def test_targets_appearing_after_an_empty_scan_are_still_recorded(self):
+        """A build scanned while it had no targets must be re-read once it has them.
+
+        The real sequence from production: the watcher selects a build that is still
+        RUNNING and has no gb_targets rows yet. That pass has nothing to record, so
+        it reports all_confirmed -- a finished build with genuinely no lineage must
+        not pin the checkpoint. But the confirmation rests on an empty set; the sink
+        was never asked about anything.
+
+        Caching that as complete is the bug: the skip gate is "cached complete AND
+        finished", and when the build then succeeds and its target appears, both
+        halves hold and the build is skipped without ever re-reading its targets.
+        The lineage was recorded only after a service restart, which is the one
+        thing that clears the in-memory set.
+        """
+        watcher, store = self._make_watcher()
+        build = _build("B1", _BASE, Status.RUNNING)
+        self._builds = [build]
+        self._targets = []
+        self._seed("B1", _BASE)
+
+        watcher._reconcile()
+        assert store.calls == [], "nothing to record while the build has no targets"
+        assert "B1" not in watcher._complete_builds, (
+            "an empty pass must not be cached as complete: the sink was never asked "
+            "about any target, so there is nothing to skip re-reading later"
+        )
+
+        # By the time the build reads SUCCESS its target rows are already persisted
+        # (buildrunner finalizes children before the parent), so a later scan sees
+        # both -- provided the build was not cached as complete by the empty pass.
+        build.status = Status.SUCCESS
+        self._targets = [_target("B1", "t-b1")]
+
+        watcher._reconcile()
+        recorded = {target_id for _build_id, target_id in store.calls}
+        assert recorded == {"t-b1"}, (
+            "the target that appeared after the empty scan must be recorded without "
+            "needing a restart to clear the completed-build cache"
+        )
+
     def test_checkpoint_never_steps_off_a_non_finished_build(self):
         """The mark never leaves a running build, never jumping past it to C.
 
@@ -572,6 +613,137 @@ class TestLineageWatcher:
 
         assert self._checkpoint_build() == "B"
 
+    def test_finished_no_target_anchor_does_not_wedge_the_checkpoint(self):
+        """The anchor itself has no targets: the mark must still step off it.
+
+        The previous test seeds an anchor that *has* a target, so the advance is
+        gated on a build that gets cached either way -- the no-target build is
+        only the destination and never the anchor. Here the empty build is the
+        anchor, which is the case that wedges: it is finished, so it will never
+        gain a target, but _advance_checkpoint requires the anchor in
+        _complete_builds. Refusing to cache it pins the mark on it forever and
+        blocks every newer build's lineage behind it.
+        """
+        watcher, store = self._make_watcher()
+        self._builds = [
+            _build("A", _BASE, Status.SUCCESS),
+            _build("B", _BASE + timedelta(minutes=1), Status.SUCCESS),
+        ]
+        self._targets = [_target("B", "t-b")]
+        self._seed("A", _BASE)
+
+        # Two scans: the first advances off the empty anchor A, the second must
+        # then advance off B. A single scan passes even when wedged, because the
+        # first pass is the one that reads A while it is still the anchor.
+        watcher._reconcile()
+        assert self._checkpoint_build() == "B", "the mark wedged on empty anchor A"
+
+        watcher._reconcile()
+
+        assert {target_id for _build_id, target_id in store.calls} == {"t-b"}
+
+    def test_failed_anchor_with_no_targets_does_not_wedge_the_checkpoint(self):
+        """A FAILED build is the common shape of a finished build with no lineage.
+
+        ``select_builds_from_checkpoint`` has no status filter, so a FAILED build
+        does become an anchor -- and it records nothing by definition. If that
+        wedged the mark, one failed build would stop lineage for the platform.
+        """
+        watcher, _store = self._make_watcher()
+        self._builds = [
+            _build("A", _BASE, Status.FAILED),
+            _build("B", _BASE + timedelta(minutes=1), Status.SUCCESS),
+        ]
+        self._targets = [_target("B", "t-b")]
+        self._seed("A", _BASE)
+
+        watcher._reconcile()
+
+        assert self._checkpoint_build() == "B"
+
+    def test_running_build_with_no_targets_is_not_cached_as_complete(self):
+        """The original bug: an empty pass on a RUNNING build must not be cached.
+
+        Caching it arms the skip gate ("cached complete AND finished") on a build
+        whose targets are written moments later, so they are never re-read and the
+        lineage appears only after a restart. Finished-and-empty is cached;
+        running-and-empty is not, and the build state is the whole distinction.
+        """
+        watcher, store = self._make_watcher()
+        self._builds = [_build("A", _BASE, Status.RUNNING)]
+        self._targets = []
+        self._seed("A", _BASE)
+
+        watcher._reconcile()
+        assert "A" not in watcher._complete_builds
+
+        # A finishes and its targets land: the next scan must re-read them.
+        self._builds = [_build("A", _BASE, Status.SUCCESS)]
+        self._targets = [_target("A", "t-a")]
+
+        watcher._reconcile()
+
+        assert {target_id for _build_id, target_id in store.calls} == {"t-a"}
+
+    def test_running_build_with_only_dropped_targets_is_not_cached_as_complete(self):
+        """The sibling of the bug above, on the all-targets-dropped path.
+
+        A RUNNING build whose only targets so far are all in the durable drop set
+        also confirms without a sink answer: every target is filtered out of
+        `candidates`, so filter_unrecorded is never called. That pass used to report
+        all_confirmed without flagging itself unqueried, so it was cached complete
+        and the skip gate ("cached complete AND finished") then swallowed the
+        non-dropped target that arrived before the build finished -- the same
+        restart-only recovery as the empty case.
+        """
+        watcher, store = self._make_watcher()
+        self.storage.kv_pair_storage.set_value(
+            LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": ["t-dropped"]}
+        )
+        self._builds = [_build("A", _BASE, Status.RUNNING)]
+        self._targets = [_target("A", "t-dropped")]
+        self._seed("A", _BASE)
+
+        watcher._reconcile()
+        assert store.calls == [], "the only target is permanently dropped"
+        assert "A" not in watcher._complete_builds, (
+            "an all-dropped pass on a RUNNING build asked the sink nothing, so it "
+            "must not arm the skip gate against targets still to come"
+        )
+
+        # A gains a target that is *not* dropped, then finishes: the next scan must
+        # re-read its targets rather than skip the build.
+        self._builds = [_build("A", _BASE, Status.SUCCESS)]
+        self._targets = [_target("A", "t-dropped"), _target("A", "t-live")]
+
+        watcher._reconcile()
+
+        assert {target_id for _build_id, target_id in store.calls} == {"t-live"}
+
+    def test_finished_build_with_only_dropped_targets_is_cached_as_complete(self):
+        """The other half: a *finished* all-dropped build must still be cached.
+
+        _advance_checkpoint requires the anchor in _complete_builds, so refusing to
+        cache this build pins the mark on it forever and blocks every newer build's
+        lineage -- exactly what the durable drop set exists to prevent. Flagging the
+        pass unqueried must not cost that.
+        """
+        watcher, _store = self._make_watcher()
+        self.storage.kv_pair_storage.set_value(
+            LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": ["t-dropped"]}
+        )
+        self._builds = [
+            _build("A", _BASE, Status.SUCCESS),
+            _build("B", _BASE + timedelta(minutes=1), Status.SUCCESS),
+        ]
+        self._targets = [_target("A", "t-dropped"), _target("B", "t-b")]
+        self._seed("A", _BASE)
+
+        watcher._reconcile()
+
+        assert "A" in watcher._complete_builds
+        assert self._checkpoint_build() == "B", "the mark must not wedge on A"
+
     # ---- fail-closed dedup ------------------------------------------------
 
     def test_dedup_failure_aborts_the_pass_and_records_nothing(self):
@@ -741,6 +913,87 @@ class TestLineageWatcher:
         assert "t-a" in watcher._dropped
         assert self._checkpoint_build() == "A"
 
+    def test_clearing_the_row_retries_the_target_without_a_restart(self):
+        """The point of re-reading every scan: `lineage-init --clear` needs no restart.
+
+        Previously _dropped was loaded once in start(), so a cleared row was invisible
+        to a live watcher -- and worse, the next drop persisted the whole stale set,
+        undoing the operator's clear.
+        """
+        watcher, store = self._make_watcher(fail={"t-1"})
+        self._builds = [_build("A", _BASE, Status.SUCCESS)]
+        self._targets = [_target("A", "t-1")]
+        self._seed("A", _BASE)
+        for _ in range(LineageWatcher._MAX_RECORD_ATTEMPTS):
+            watcher._reconcile()
+        assert "t-1" in watcher._dropped
+
+        # What the CLI writes, on the same live instance.
+        self.storage.kv_pair_storage.set_value(
+            LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": []}
+        )
+        store._fail = set()
+        watcher._reconcile()
+
+        assert "t-1" not in watcher._dropped, "the clear must take effect on this scan"
+        assert "t-1" in store._recorded, "the target must actually be retried"
+
+    def test_the_watcher_does_not_undo_a_clear_on_its_next_drop(self):
+        """A later drop must persist only what is still dropped, not a stale set."""
+        watcher, store = self._make_watcher(fail={"t-1", "t-2"})
+        self._builds = [_build("A", _BASE, Status.SUCCESS)]
+        self._targets = [_target("A", "t-1"), _target("A", "t-2")]
+        self._seed("A", _BASE)
+        for _ in range(LineageWatcher._MAX_RECORD_ATTEMPTS):
+            watcher._reconcile()
+        assert watcher._dropped == {"t-1", "t-2"}
+
+        self.storage.kv_pair_storage.set_value(
+            LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": []}
+        )
+        # t-2 keeps failing and gets re-dropped; t-1 must not come back with it.
+        store._fail = {"t-2"}
+        for _ in range(LineageWatcher._MAX_RECORD_ATTEMPTS + 1):
+            watcher._reconcile()
+
+        persisted = self.storage.kv_pair_storage.get_value(LINEAGE_WATCHER_DROPPED_KEY)
+        assert "t-1" not in persisted["target_ids"], "the clear was undone"
+
+    def test_an_unpersisted_drop_survives_the_next_scans_reload(self):
+        """A drop whose persist failed must not be resurrected by the reload.
+
+        _persist_dropped is non-raising, so the decision can exist only in memory;
+        treating the row as authoritative without adding those back would re-record a
+        hopeless target on every scan.
+        """
+        watcher, _store = self._make_watcher()
+        watcher._dropped = {"t-9"}
+        failing = MagicMock()
+        failing.kv_pair_storage.set_value.side_effect = RuntimeError("kv down")
+        watcher._persist_dropped(failing)
+        assert watcher._dropped_unpersisted == {"t-9"}
+
+        # The durable row never got it, but the reload must not drop it.
+        watcher._load_dropped(self.storage)
+
+        assert "t-9" in watcher._dropped
+
+    def test_a_successful_persist_hands_ids_over_to_the_row(self):
+        """After a good persist the ids live in the row, so a clear can reach them."""
+        watcher, _store = self._make_watcher()
+        watcher._dropped = {"t-9"}
+        watcher._dropped_unpersisted = {"t-9"}
+        watcher._persist_dropped(self.storage)
+
+        assert watcher._dropped_unpersisted == set()
+
+        self.storage.kv_pair_storage.set_value(
+            LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": []}
+        )
+        watcher._load_dropped(self.storage)
+
+        assert watcher._dropped == set(), "a persisted id must follow the row"
+
     def test_dropped_target_survives_a_restart(self):
         """The drop decision is durable, so a restart does not resurrect it."""
         watcher, _store = self._make_watcher(fail={"t-1"})
@@ -755,6 +1008,139 @@ class TestLineageWatcher:
         fresh._load_dropped(self.storage)
 
         assert "t-1" in fresh._dropped
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "oops",
+            ["t-1"],
+            7,
+            {"target_ids": "t-1"},
+            {"target_ids": 3},
+            # These pass a container-only check but make _persist_dropped's sorted()
+            # raise on the next drop, which unwinds into _run and fails every scan.
+            {"target_ids": ["t-1", 7]},
+            {"target_ids": [1, 2]},
+            {"target_ids": [None]},
+        ],
+    )
+    def test_an_unusable_drop_set_starts_empty_instead_of_raising(self, bad_value):
+        """A corrupt row must not abort start(): a dead watcher records nothing.
+
+        Empty is the only readable fallback, but it is the wedge the drop set
+        exists to prevent, so it is logged at ERROR rather than swallowed.
+        """
+        self.storage.kv_pair_storage.set_value(LINEAGE_WATCHER_DROPPED_KEY, bad_value)
+
+        fresh = LineageWatcher()
+        fresh._store = _StubStore()
+        fresh._load_dropped(self.storage)
+
+        assert fresh._dropped == set()
+
+    def test_an_unusable_drop_set_is_left_on_disk_for_inspection(self):
+        """Loading never rewrites the bad row -- the operator still needs to see it."""
+        self.storage.kv_pair_storage.set_value(LINEAGE_WATCHER_DROPPED_KEY, "oops")
+
+        fresh = LineageWatcher()
+        fresh._store = _StubStore()
+        fresh._load_dropped(self.storage)
+
+        assert (
+            self.storage.kv_pair_storage.get_value(LINEAGE_WATCHER_DROPPED_KEY)
+            == "oops"
+        )
+
+    def test_persisting_after_a_corrupt_load_does_not_raise(self):
+        """The load fallback must leave a persistable set, or the watcher wedges.
+
+        A mixed list loaded as-is makes ``_persist_dropped``'s sorted() raise on the
+        next drop; ``on_error`` runs outside ``reconcile_build``'s try/except, so that
+        unwinds into ``_run`` and fails every scan from then on -- worse than the
+        empty-set fallback the guard chooses.
+        """
+        self.storage.kv_pair_storage.set_value(
+            LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": ["t-1", 7]}
+        )
+
+        fresh = LineageWatcher()
+        fresh._store = _StubStore()
+        fresh._load_dropped(self.storage)
+        fresh._dropped.add("t-2")
+        fresh._persist_dropped(self.storage)
+
+        assert self.storage.kv_pair_storage.get_value(LINEAGE_WATCHER_DROPPED_KEY) == {
+            "target_ids": ["t-2"]
+        }
+
+    def test_a_failing_persist_never_escapes_to_abort_the_scan(self):
+        """Durability is best-effort; the scan loop is not.
+
+        ``_on_record_error`` persists from inside ``reconcile_build``, so a raise here
+        would kill the iteration and every one after it.
+        """
+        storage = MagicMock()
+        storage.kv_pair_storage.set_value.side_effect = RuntimeError("kv down")
+
+        fresh = LineageWatcher()
+        fresh._store = _StubStore()
+        fresh._dropped = {"t-1"}
+        fresh._persist_dropped(storage)
+
+        assert fresh._dropped == {"t-1"}
+
+    def test_a_failing_drop_set_read_starts_empty_instead_of_raising(self):
+        """A storage error is treated the same as a corrupt shape."""
+        storage = MagicMock()
+        storage.kv_pair_storage.get_value.side_effect = RuntimeError("kv down")
+
+        fresh = LineageWatcher()
+        fresh._store = _StubStore()
+        fresh._load_dropped(storage)
+
+        assert fresh._dropped == set()
+
+    @pytest.mark.parametrize("bad_value", ["oops", {"target_ids": ["t-9", 7]}])
+    def test_an_unusable_row_keeps_the_current_set(self, bad_value):
+        """A bad row must not retry what this process knows is hopeless.
+
+        _load_dropped now runs every scan, so "clear on failure" would re-record a
+        dropped target on every pass for as long as the row stays corrupt. Keeping
+        the in-memory set is the conservative direction.
+        """
+        self.storage.kv_pair_storage.set_value(LINEAGE_WATCHER_DROPPED_KEY, bad_value)
+
+        fresh = LineageWatcher()
+        fresh._store = _StubStore()
+        fresh._dropped = {"t-known"}
+        fresh._load_dropped(self.storage)
+
+        assert fresh._dropped == {"t-known"}
+
+    def test_starting_resets_a_set_left_by_a_previous_run(self):
+        """start() re-reads from scratch, so a stale instance does not leak state."""
+        self.storage.kv_pair_storage.set_value(
+            LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": ["t-row"]}
+        )
+
+        fresh = LineageWatcher()
+        fresh._dropped = {"t-stale"}
+        fresh._dropped_unpersisted = {"t-stale"}
+        with (
+            patch(
+                "gbserver.lineage.lineage_watcher.get_lineage_store",
+                return_value=_StubStore(),
+            ),
+            patch(
+                "gbserver.lineage.lineage_watcher.get_admin_storage",
+                return_value=self.storage,
+            ),
+            patch.object(LineageWatcher, "_run"),
+        ):
+            fresh.start()
+            fresh.stop_event.set()
+
+        assert fresh._dropped == {"t-row"}, "the stale set must not survive start()"
 
     # ---- checkpoint value handling ---------------------------------------
 

@@ -113,6 +113,13 @@ class LineageWatcher:
         # unrecorded lineage: an in-memory-only drop set would let a dropped target
         # return after a restart and block the checkpoint forever.
         self._dropped: set[str] = set()
+        # Drops this process decided but could not persist (_persist_dropped is
+        # non-raising, so a kv failure leaves the decision in memory only). Tracked
+        # separately because _load_dropped re-reads the durable row every scan and
+        # takes it as authoritative: without this, an unpersisted drop would be
+        # dropped from the set on the next scan and the target re-recorded forever,
+        # while a *persisted* id must follow the row so an operator's clear lands.
+        self._dropped_unpersisted: set[str] = set()
         # target_uuid -> attempts so far, for targets to retry on a later scan.
         self._failed_attempts: dict[str, int] = {}
         # Builds whose lineage the sink has confirmed complete this process. Two
@@ -145,8 +152,12 @@ class LineageWatcher:
 
         self._store = get_lineage_store()
         storage = get_admin_storage()
-        # Load the durable drop set before the first scan, so a target already
-        # given up on stays skipped instead of blocking the checkpoint again.
+        # Load the durable drop set up front so a target already given up on stays
+        # skipped from the first scan. _reconcile re-reads it every scan too; this
+        # only makes the state correct before the thread is running, and resets it
+        # when start() runs again on an instance a previous stop() left populated.
+        self._dropped = set()
+        self._dropped_unpersisted = set()
         self._load_dropped(storage)
         self.worker_thread = threading.Thread(
             target=self._run, name="lineage-watcher", daemon=True
@@ -155,7 +166,7 @@ class LineageWatcher:
         logger.info("LineageWatcher started")
 
     def _load_dropped(self, storage: SingletonAdminStorage) -> None:
-        """Load the durable set of permanently-given-up-on target uuids.
+        """Re-read the durable set of permanently-given-up-on target uuids.
 
         A dropped target is one that failed ``_MAX_RECORD_ATTEMPTS`` times; the
         decision to stop trying is permanent, so it must outlive the process.
@@ -163,16 +174,97 @@ class LineageWatcher:
         checkpoint (which never advances past a build with unrecorded lineage),
         exhaust its attempts again, and repeat every restart — wedging all newer
         lineage behind it.
+
+        Called before every scan, not once in ``start()``, for the same reason the
+        checkpoint is: the row is the single source of truth, so an operator who
+        clears it with ``lineage-init --clear-dropped-targets`` has the targets
+        retried on the next scan instead of having to restart the service. Loading
+        once also made the clear *unsafe* rather than merely slow -- the next drop
+        persisted the whole stale in-memory set, restoring every id just cleared.
+
+        The row is authoritative, plus any drop this process could not persist. A
+        plain union would never let a clear through (the cleared ids are still in
+        memory); a plain assignment would resurrect a drop whose persist failed
+        (``_persist_dropped`` is deliberately non-raising), re-recording a hopeless
+        target every scan. Taking the row and adding back only
+        ``_dropped_unpersisted`` gets both: the clear lands, the unpersisted drop
+        survives.
+
+        A read failure or an unusable shape is logged and leaves the in-memory set
+        as it is: raising would abort ``start()`` (no watcher at all) or, per scan,
+        kill the loop. Keeping the current set is the conservative direction -- it
+        skips what this process already knows is hopeless rather than retrying it --
+        and it is logged at ERROR with the offending value, not swallowed. The row is
+        left for an operator to inspect; the next ``_persist_dropped`` overwrites it,
+        which is why the value goes in the log while it still exists.
         """
-        value = storage.kv_pair_storage.get_value(LINEAGE_WATCHER_DROPPED_KEY)
-        if value:
-            self._dropped = set(value.get("target_ids", []))
+        try:
+            value = storage.kv_pair_storage.get_value(LINEAGE_WATCHER_DROPPED_KEY)
+        except Exception:
+            logger.exception(
+                "Failed to read the lineage drop set from %s; keeping the current "
+                "in-memory set (%d target(s)) for this scan.",
+                LINEAGE_WATCHER_DROPPED_KEY,
+                len(self._dropped),
+            )
+            return
+
+        if value is None:
+            # No row at all: never seeded, or cleared by deleting it rather than
+            # emptying it. Treated the same as an empty set -- honouring that is the
+            # point of re-reading -- while unpersisted drops are added back below.
+            value = {}
+
+        target_ids = value.get("target_ids", []) if isinstance(value, dict) else None
+        # Element types matter as much as the container's: a mixed list loads fine
+        # here but makes ``_persist_dropped``'s sorted() raise on the next drop, and
+        # that unwinds through reconcile_build (on_error is called outside its
+        # try/except) into _run, failing every scan forever.
+        if isinstance(target_ids, list) and not all(
+            isinstance(t, str) for t in target_ids
+        ):
+            target_ids = None
+        if not isinstance(target_ids, list):
+            logger.error(
+                "Lineage drop set under %s is unusable (%r); keeping the current "
+                "in-memory set (%d target(s)). Expected {'target_ids': [...]}.",
+                LINEAGE_WATCHER_DROPPED_KEY,
+                value,
+                len(self._dropped),
+            )
+            return
+
+        self._dropped = set(target_ids) | self._dropped_unpersisted
 
     def _persist_dropped(self, storage: SingletonAdminStorage) -> None:
-        """Persist the drop set so the decision survives a restart."""
-        storage.kv_pair_storage.set_value(
-            LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": sorted(self._dropped)}
-        )
+        """Persist the drop set so the decision survives a restart.
+
+        Never raises. ``_on_record_error`` calls this from inside ``reconcile_build``,
+        where ``on_error`` runs outside the try/except guarding the record call, so an
+        exception here would unwind into ``_run`` and fail the whole scan -- and then
+        every later scan the same way. Losing durability for one drop only costs a
+        re-attempt after a restart; losing the scan loop stops all lineage.
+
+        On failure the set is remembered in ``_dropped_unpersisted`` so the next
+        ``_load_dropped`` -- which treats the durable row as authoritative -- adds it
+        back instead of resurrecting the target. A success clears that, handing those
+        ids over to the row, where an operator's clear can then reach them.
+        """
+        try:
+            storage.kv_pair_storage.set_value(
+                LINEAGE_WATCHER_DROPPED_KEY, {"target_ids": sorted(self._dropped)}
+            )
+        except Exception:
+            self._dropped_unpersisted |= self._dropped
+            logger.exception(
+                "Failed to persist the lineage drop set to %s; the in-memory set "
+                "still applies for this process, but the drop decision will not "
+                "survive a restart.",
+                LINEAGE_WATCHER_DROPPED_KEY,
+            )
+            return
+
+        self._dropped_unpersisted.clear()
 
     def _run(self) -> None:
         """Main monitoring loop (runs in daemon thread).
@@ -248,6 +340,10 @@ class LineageWatcher:
         logger.info("Lineage scan: reading checkpoint and builds...")
 
         storage = get_admin_storage()
+        # Re-read the drop set every scan, like the checkpoint below: it is the
+        # single source of truth, so `lineage-init --clear-dropped-targets` retries
+        # those targets on the next scan rather than requiring a service restart.
+        self._load_dropped(storage)
         checkpoint = self._read_checkpoint(storage)
         if checkpoint is None:
             # No checkpoint: recording is off until seeded. Return before selecting
@@ -375,9 +471,66 @@ class LineageWatcher:
                     ", ".join(sorted(result.dropped)),
                 )
 
-            if result.all_confirmed:
+            if result.all_confirmed and (
+                not result.sink_unqueried or build.status.is_finished()
+            ):
                 self._complete_builds.add(build.uuid)
             else:
+                # A confirmation the sink was never asked for is cached only once the
+                # build is finished, and the build state is what separates the two
+                # reasons such a pass can come back with an empty candidate set.
+                # Either reason reaches here: no target rows at all, or target rows
+                # that are all in the durable drop set.
+                #
+                # Still RUNNING: the targets do not exist *yet*. The build row and
+                # its target rows are separate, non-transactional writes, so a scan
+                # lands between them and reads none. Caching that would arm the skip
+                # gate below ("cached complete AND finished") on a build whose
+                # targets appear moments later, and it would then skip re-reading
+                # them forever -- only a restart cleared this set, which is exactly
+                # how the bug surfaced (lineage recorded only after a service
+                # restart).
+                #
+                # Finished: the emptiness is treated as final and cached above. It
+                # has to be: _advance_checkpoint requires the anchor in this set, so
+                # discarding a finished build here would wedge the mark on it
+                # forever and block every newer build's lineage behind it. That
+                # includes every FAILED build, which select_builds_from_checkpoint
+                # does not filter out and which therefore does become an anchor.
+                #
+                # "Finished" is very nearly "will never gain a *recordable* target",
+                # and the gap is narrower than the bare build/target write ordering
+                # suggests. Two things close most of it:
+                #
+                #   - finalize_build_status (buildrunner/build_utils.py) finalizes
+                #     targets before it writes the build's terminal status, and
+                #     writes that status only when the build is not already
+                #     finished. So on the ordinary path the targets are committed
+                #     first, by construction rather than by luck.
+                #   - select_recordable_targets asks for status==SUCCESS with a
+                #     non-NULL finished_at, so a merely-present row is not enough to
+                #     lose. Notably the re-run entity finalization does NOT
+                #     manufacture one: _finalize_target_or_step_status leaves a
+                #     PENDING target PENDING when the build succeeded (it logs a
+                #     warning and treats it as a platform bug), so it never
+                #     back-fills a target into SUCCESS behind us.
+                #
+                # What remains is a genuine target event -- carrying its own SUCCESS
+                # and finished_at -- drained from the buildrunner's FIFO after a
+                # terminal status was written from *outside* that flow: an external
+                # cancel, or a concurrent stop_and_fail() landing on a cached
+                # StoredBuild status (see the skip gate's note on that stale
+                # window). When that happens the skip gate never re-reads this build
+                # and the checkpoint advances past it, losing that lineage until a
+                # restart clears this in-memory set.
+                #
+                # That is the accepted side of the trade, and the asymmetry is what
+                # settles it: the loss is rare and bounded by process lifetime,
+                # while the alternative wedges the mark on every finished build with
+                # no recordable targets -- the common case, not the race. If it ever
+                # needs closing, the cheap fix lives here (age out this set, or
+                # withhold caching when the terminal status did not come from the
+                # runner) rather than in a status re-read next to the target insert.
                 self._complete_builds.discard(build.uuid)
 
         advanced = self._advance_checkpoint(storage, anchor_build_id, builds)
@@ -442,8 +595,10 @@ class LineageWatcher:
         anchor_index = next(
             (i for i, b in enumerate(builds) if b.uuid == anchor_build_id), None
         )
-        anchor = builds[anchor_index] if anchor_index is not None else None
-        if anchor is None:
+        # Branch on the index rather than on a separate `anchor is None` check: the
+        # two are equivalent at runtime, but narrowing the index here is what lets
+        # the successor slice below use it as an int without a second guard.
+        if anchor_index is None:
             # No anchor row to gate on. Two very different reasons:
             #
             # The backfill sentinel names no build by construction, so it is never
@@ -458,6 +613,7 @@ class LineageWatcher:
             if anchor_build_id != BACKFILL_BUILD_ID:
                 return False
             return self._write_checkpoint(storage, builds[0])
+        anchor = builds[anchor_index]
         # The gate: the mark may leave the anchor only once the anchor can no
         # longer gain lineage and everything it has is in the sink. A running
         # anchor, or one whose targets failed to record, holds the mark — stepping
