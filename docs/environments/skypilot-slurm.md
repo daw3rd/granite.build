@@ -42,9 +42,26 @@ error. The SSH private key and the cluster itself stay out-of-band — gbserver 
 
 ### `cluster` / `zone`
 
-- `cluster` (env-level) is composed into `infra=slurm/<cluster>` for steps that don't set their own
-  `resources.infra`. A step launcher can also set `resources.cluster`.
-- `zone` maps to the SLURM **partition**.
+- `cluster` is composed into `infra=slurm/<cluster>` for steps that don't set their own
+  `resources.infra`.
+- `zone` maps to the SLURM **partition** (submitted via `--partition`), composed as
+  `infra=slurm/<cluster>/<zone>`. It is **omitted entirely when unset**, letting SLURM pick the
+  cluster's default partition.
+
+Both are resolved with the following precedence (highest first), so the partition can be set at
+whichever layer is most convenient:
+
+1. `resources.infra` on the step launcher — an explicit full infra string wins outright.
+2. `resources.cluster` / `resources.zone` on the step launcher (from `step.yaml`, or `build.yaml`
+   `config.launcher_config.resources`).
+3. `cluster` / `zone` as plain top-level keys in the step/build `config` (e.g. a `zone:` in
+   `build.yaml`).
+4. `cluster` / `zone` in this `environment.yaml` `config`.
+
+This precedence is implemented in `Skypilot._resolve_infra_and_zone` and applies to the `slurm`
+cloud only. For a real-cluster example, see the
+[`skypilot/slurm/ibm-bluevela`](../../configurations/assets/environments/skypilot/slurm/ibm-bluevela/environment.yaml)
+environment (BlueVela's `gpu-mid` partition, reached at `login1`).
 
 ### Autostop is ignored
 

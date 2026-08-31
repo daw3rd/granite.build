@@ -889,6 +889,47 @@ class Skypilot(Environment):
             return 10
         return self.config.config.get("idle_minutes_to_autostop", 10)
 
+    def _resolve_infra_and_zone(
+        self: Self, cloud: str, override_res: dict, config: dict
+    ) -> tuple[str, str | None]:
+        """Resolve the SkyPilot ``infra`` string and standalone ``zone`` arg.
+
+        Supports the ``cloud/cluster/partition`` infra format. For the
+        ``slurm`` cloud, ``cluster``/``zone`` (the SLURM partition) fall back
+        through the step/build ``config`` and then the environment.yaml
+        ``config`` when not set on the resources override, so the partition can
+        be set at any of those layers (precedence: resources override > step or
+        build ``config`` > environment.yaml ``config``). The partition segment
+        is omitted entirely when no ``zone`` resolves. For other clouds only the
+        resources override is consulted (behavior unchanged).
+
+        :param cloud: resolved target cloud (e.g. ``"slurm"``, ``"lsf"``).
+        :param override_res: merged step/build launcher ``resources`` dict.
+        :param config: the step/build ``config`` dict.
+        :returns: an ``(infra, zone)`` tuple; ``zone`` is ``None`` whenever it
+            was folded into the infra string (sky.Resources rejects specifying
+            both ``infra`` with a zone segment and a separate ``zone``).
+        """
+        # An explicit full infra string wins outright.
+        if override_res.get("infra"):
+            return override_res["infra"], None
+
+        cluster = override_res.get("cluster")
+        zone = override_res.get("zone")
+        if cloud == "slurm":
+            env_cfg = self.config.config if self.config else {}
+            cluster = cluster or config.get("cluster") or env_cfg.get("cluster")
+            zone = zone or config.get("zone") or env_cfg.get("zone")
+
+        if cluster:
+            infra = f"{cloud}/{cluster}"
+            return (f"{infra}/{zone}", None) if zone else (infra, None)
+        if zone:
+            # zone without cluster — fold into infra to avoid the "cannot
+            # specify both infra and zone" error in sky.Resources.
+            return (f"{cloud}/{zone}" if cloud else zone, None)
+        return cloud, None
+
     @staticmethod
     def _cluster_name_for(launch_id: str, attempt: int = 0) -> str:
         """Generate a unique cluster name from a launch_id.
@@ -1248,19 +1289,8 @@ class Skypilot(Environment):
             }
 
             # Build infra string: supports 'cloud/cluster/partition' format
-            # (e.g., 'slurm/mycluster/gpu', 'lsf/bluevela/normal')
-            infra = override_res.get("infra") or cloud
-            zone = override_res.get("zone")
-            if not override_res.get("infra") and override_res.get("cluster"):
-                infra = f"{cloud}/{override_res['cluster']}"
-                if zone:
-                    infra = f"{infra}/{zone}"
-                    zone = None
-            elif not override_res.get("infra") and zone:
-                # zone without cluster — fold into infra to avoid the
-                # "cannot specify both infra and zone" error in sky.Resources
-                infra = f"{infra}/{zone}" if infra else zone
-                zone = None
+            # (e.g., 'slurm/mycluster/gpu', 'lsf/bluevela/normal').
+            infra, zone = self._resolve_infra_and_zone(cloud, override_res, config)
 
             # Normalized target cloud: the first infra segment, lowercased — the
             # single source of truth for cloud-specific resource handling (the

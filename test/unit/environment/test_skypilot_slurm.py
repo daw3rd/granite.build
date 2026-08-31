@@ -163,6 +163,110 @@ class TestSlurmInfraPath:
         assert call_kwargs["infra"] == "slurm"
 
 
+def _make_env(config: dict) -> Skypilot:
+    """Build a Skypilot environment from a raw env-config dict.
+
+    :param config: the EnvironmentConfig.config payload (default_cloud,
+        cluster, zone, etc.).
+    :returns: a Skypilot instance wired to a fresh event queue.
+    """
+    return Skypilot(
+        event_q=asyncio.Queue(),
+        environment_config=EnvironmentConfig(
+            name="test-slurm", type="Skypilot", config=config
+        ),
+    )
+
+
+async def _launch_and_get_resources(env: Skypilot, launch_id: str, **launch_kwargs):
+    """Launch under mocked sky and return the sky.Resources call kwargs.
+
+    :param env: the Skypilot environment under test.
+    :param launch_id: unique id for this launch (arms the ready event).
+    :param launch_kwargs: forwarded to launch_skypilot (launcher_config, config).
+    :returns: the kwargs dict passed to the mocked sky.Resources constructor.
+    """
+    mock_sky = _mock_sky()
+    with (
+        patch("gbserver.environment.skypilot.sky", mock_sky),
+        patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+    ):
+        env._get_launch_ready_event(launch_id)
+        await env.launch_skypilot(launch_id=launch_id, **launch_kwargs)
+    return mock_sky.Resources.call_args[1]
+
+
+class TestSlurmEnvConfigPartition:
+    """The SLURM partition (`zone`) and `cluster` can be set from the
+    environment.yaml or step/build `config`, not just the resources override,
+    with resources > config > env precedence; the partition is omitted when
+    no `zone` resolves."""
+
+    @pytest.mark.asyncio
+    async def test_env_config_cluster_and_zone_compose_into_infra(self):
+        env = _make_env(
+            {"default_cloud": "slurm", "cluster": "bluevela", "zone": "gpu-mid"}
+        )
+        kw = await _launch_and_get_resources(
+            env, "envcfg-1", launcher_config={"run": "hostname", "resources": {}}, config={}
+        )
+        assert kw["infra"] == "slurm/bluevela/gpu-mid"
+        assert kw["zone"] is None
+
+    @pytest.mark.asyncio
+    async def test_env_config_cluster_without_zone_omits_partition(self):
+        env = _make_env({"default_cloud": "slurm", "cluster": "bluevela"})
+        kw = await _launch_and_get_resources(
+            env, "envcfg-2", launcher_config={"run": "hostname", "resources": {}}, config={}
+        )
+        assert kw["infra"] == "slurm/bluevela"
+        assert kw["zone"] is None
+
+    @pytest.mark.asyncio
+    async def test_step_config_zone_overrides_env_zone(self):
+        env = _make_env(
+            {"default_cloud": "slurm", "cluster": "bluevela", "zone": "gpu-mid"}
+        )
+        kw = await _launch_and_get_resources(
+            env,
+            "envcfg-3",
+            launcher_config={"run": "hostname", "resources": {}},
+            config={"zone": "big"},
+        )
+        assert kw["infra"] == "slurm/bluevela/big"
+        assert kw["zone"] is None
+
+    @pytest.mark.asyncio
+    async def test_resources_override_beats_config_and_env(self):
+        env = _make_env(
+            {"default_cloud": "slurm", "cluster": "bluevela", "zone": "gpu-mid"}
+        )
+        kw = await _launch_and_get_resources(
+            env,
+            "envcfg-4",
+            launcher_config={
+                "run": "hostname",
+                "resources": {"cluster": "other", "zone": "small"},
+            },
+            config={"cluster": "cfg", "zone": "cfgzone"},
+        )
+        assert kw["infra"] == "slurm/other/small"
+        assert kw["zone"] is None
+
+    @pytest.mark.asyncio
+    async def test_non_slurm_ignores_env_config_zone(self):
+        """A non-slurm cloud must NOT pull cluster/zone from env config — only
+        the resources override is consulted (behavior unchanged for lsf/k8s)."""
+        env = _make_env(
+            {"default_cloud": "lsf", "cluster": "bluevela", "zone": "normal"}
+        )
+        kw = await _launch_and_get_resources(
+            env, "envcfg-5", launcher_config={"run": "hostname", "resources": {}}, config={}
+        )
+        assert kw["infra"] == "lsf"
+        assert kw["zone"] is None
+
+
 class TestSharedWorkdirEnvVar:
     @pytest.mark.asyncio
     async def test_shared_workdir_exposed_as_env_var(self):
