@@ -25,8 +25,7 @@ import pytest
 from pydantic import BaseModel
 
 from gbcommon.types.testing import (
-    ENV_VAR_GBTEST_MOCKED_HF_OPS,
-    HF_OP_PUSH,
+    ENV_VAR_GBTEST_MOCK_HF,
     disable_hf_mocks,
     enable_hf_mocks,
 )
@@ -52,11 +51,11 @@ def _disable_hf_op_mocking(monkeypatch):
 
     These unit tests exercise the *real* HfURI methods (pull/push/exists/delete
     and resource-group resolution) against a mocked HfApi / snapshot_download.
-    A suite-level GBTEST_MOCKED_HF_OPS (e.g. exported by ``make quick-tests``)
-    would otherwise short-circuit those methods before they call the mocked Hub,
-    so clear it here; monkeypatch restores the prior value after each test.
+    A suite-level GBTEST_MOCK_HF (forced true in mock mode) would otherwise
+    short-circuit those methods before they call the mocked Hub, so clear it
+    here; monkeypatch restores the prior value after each test.
     """
-    monkeypatch.delenv(ENV_VAR_GBTEST_MOCKED_HF_OPS, raising=False)
+    monkeypatch.delenv(ENV_VAR_GBTEST_MOCK_HF, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -634,9 +633,15 @@ def test_pull_downloads_tiny_public_model(tmp_path):
 
     Uses hf-internal-testing/tiny-random-bert — a minimal fixture model
     maintained by HuggingFace specifically for CI/testing (< 1 MB).
-    No token is required; the repo is public.
-    Skipped automatically if the Hub is unreachable.
+    No token is required; the repo is public. This is a pure HF-API integration
+    test (it verifies real downloaded files), so it runs only under a live-HF
+    run (GBTEST_LIVE_HF=true or GBTEST_MODE=live) and is skipped otherwise —
+    it belongs to the extended/live suite, not mock CI.
     """
+    from libgbtest.mode import is_live
+
+    if not is_live("hf"):
+        pytest.skip("HF not live — skipping real pull integration test")
 
     uri = HfURI.from_parts(
         owner="hf-internal-testing",
@@ -663,14 +668,21 @@ def test_pull_downloads_tiny_public_model(tmp_path):
 def test_push_uploads_file_to_huggingface(tmp_path):
     """Upload a small file to a temporary HF repo and verify it lands there.
 
-    Requires HF_TOKEN to be set with write access to the authenticated user's
-    namespace.  The test creates a throwaway repo, pushes one file, asserts
-    it appears in the repo's file listing, then deletes the repo.
-    Skipped automatically when HF_TOKEN is absent or the Hub is unreachable.
+    This is a pure HF-API integration test: it does a real push and then asserts
+    the file exists on the Hub, which is meaningless (and would fail) when HF is
+    mocked. It runs only under a live-HF run (GBTEST_LIVE_HF=true or
+    GBTEST_MODE=live) and requires HF_TOKEN with write access to the
+    authenticated user's namespace; otherwise it is skipped. It creates a
+    throwaway repo, pushes one file, asserts it appears in the repo's file
+    listing, then deletes the repo. Belongs to the extended/live suite.
     """
     import os
 
     from huggingface_hub import HfApi
+    from libgbtest.mode import is_live
+
+    if not is_live("hf"):
+        pytest.skip("HF not live — skipping real push integration test")
 
     token = os.getenv("HF_TOKEN")
     if not token:
@@ -1301,12 +1313,12 @@ class TestHfURIPushErrorVisibility:
         assert "403" in caplog.text
 
     def test_mocked_push_short_circuits(self, tmp_path):
-        """With the op mocked, push() returns without touching HfApi."""
+        """With HF mocked, push() returns without touching HfApi."""
         src = tmp_path / "f.bin"
         src.write_bytes(b"data")
         uri = HfURI.from_parts(owner="org", repo="repo", hf_type=HfType.DATASET)
 
-        enable_hf_mocks(HF_OP_PUSH)
+        enable_hf_mocks()
         try:
             with patch("gbcommon.uri.hf.HfApi") as MockApi:
                 uri.push(src)
