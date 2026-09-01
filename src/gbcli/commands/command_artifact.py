@@ -24,6 +24,7 @@ from gbcli.utils.gbconstants import (
     ARTIFACT_LIST_HEADERS,
     CLIPBOARD_CHAR,
     DEFAULT_CHECKSUM_CONCURRENCY,
+    HF_ENTERPRISE_ORGANIZATIONS,
     HF_ORGANIZATION_DEFAULT,
     LAKEHOUSE_FILESET_SHARED_TABLE_NAME,
     LAKEHOUSE_FILESET_TABLE_NAME,
@@ -59,6 +60,7 @@ from gbcli.utils.versionutil import check_current_and_latest_versions
 from gbcommon.uri.uri import URI
 from gbcommon.utils.hf_utils import (
     convert_hf_uri_to_url,
+    is_enterprise_hf_org,
     parse_hf_uri,
 )
 
@@ -77,6 +79,31 @@ try:
     from lakehouse.core import UnauthorizedException
 except ModuleNotFoundError:
     UnauthorizedException = _MissingLakehouseUnauthorizedException
+
+
+def _reject_resource_group_for_non_enterprise(exit_fn, org: str) -> None:
+    """Reject ``--resource-group-id`` when ``org`` is not an HF Enterprise org.
+
+    Resource groups exist only in HF Enterprise organizations, so pinning one
+    for an individual user namespace or a plain community org cannot mean
+    anything. Shared by ``artifact push`` and ``artifact register`` so the
+    two user-facing messages cannot drift. Worded for the CLI flag; the
+    server-side build.yaml equivalent is
+    :func:`gbserver.spaces.resource_group._non_enterprise_rg_error`.
+
+    Args:
+        exit_fn: The command's exit callable (``sys.exit`` or ``ctx.exit``).
+        org: The HuggingFace organization the id was pinned for.
+    """
+    click.echo(
+        f"❌ --resource-group-id was given for HuggingFace organization "
+        f"'{org}', but '{org}' is not an HF Enterprise organization. "
+        f"Resource groups apply only to Enterprise organizations. Drop "
+        f"--resource-group-id, or configure '{org}' as an enterprise "
+        f"organization.",
+        err=True,
+    )
+    exit_fn(1)
 
 
 @click.group("artifact")
@@ -499,12 +526,20 @@ def push(
             if not quiet:
                 click.echo(f"HuggingFace token obtained successfully!")
 
+            # Resource groups exist only in HF Enterprise organizations, so a
+            # non-Enterprise org (an individual user namespace or a plain
+            # community org) skips resolution entirely — and rejects a pinned id,
+            # which cannot mean anything there.
+            org = hf_organization or HF_ORGANIZATION_DEFAULT
+            hf_is_enterprise = is_enterprise_hf_org(org, HF_ENTERPRISE_ORGANIZATIONS)
+            if resource_group_id and not hf_is_enterprise:
+                _reject_resource_group_for_non_enterprise(sys.exit, org)
+
             # Resolve resource group id from the GB space only when the user did
             # NOT pass --resource-group-id. An explicit id is used verbatim and is
             # never reflected back into the cached space table (the user may be
             # targeting a group other than the space's default).
-            if not resource_group_id:
-                org = hf_organization or HF_ORGANIZATION_DEFAULT
+            if hf_is_enterprise and not resource_group_id:
 
                 # Resolve the space from the local cache (populated by
                 # `space list --all --refresh`) to read its cached default
@@ -525,7 +560,12 @@ def push(
                     resolved_space_name = (
                         global_space.get("name") or resolved_space_name
                     )
-                    resource_group_id = global_space.get("hf_default_resource_group_id")
+                    cached_rg_id = global_space.get("hf_default_resource_group_id")
+                    # resolve_space() fills unresolvable profile spaces with the
+                    # literal "<unknown>" (a truthy string), which would be sent
+                    # to create_repo as if it were a real id. Treat it as absent.
+                    if cached_rg_id and cached_rg_id != "<unknown>":
+                        resource_group_id = cached_rg_id
                 if not resource_group_id:
                     if not resolved_space_name:
                         click.echo(
@@ -920,10 +960,6 @@ def push(
     help="HuggingFace organization name for artifact registration.",
 )
 @click.option(
-    "--resource-group-id",
-    help="Resource group ID for artifact registration.",
-)
-@click.option(
     "--store",
     default="lh",
     type=click.Choice(["lh", "hf"], case_sensitive=True),
@@ -960,7 +996,6 @@ def register(
     origin_list: str,
     certify_no_restrictions: bool,
     hf_organization: str,
-    resource_group_id: str,
     format: str,
     skip_version_check: bool,
     quiet: bool,
@@ -1406,7 +1441,6 @@ def register(
                 origin_uris=normalized_origins,
                 certified_no_restrictions=certify_no_restrictions,
                 hf_organization=hf_organization,
-                resource_group_id=resource_group_id,
                 store=store,
                 callback=echo_callback,
             )
@@ -1430,7 +1464,6 @@ def register(
                 origin_uris=normalized_origins,
                 certified_no_restrictions=certify_no_restrictions,
                 hf_organization=hf_organization,
-                resource_group_id=resource_group_id,
                 store=store,
                 callback=echo_callback,
             )
