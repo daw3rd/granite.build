@@ -418,9 +418,11 @@ def _clear_skypilot_ssh_control_sockets() -> None:
     happens to sit at that depth is left untouched.
 
     Best-effort: a socket that cannot be stat'd/unlinked is left in place
-    (OpenSSH re-creates sockets as needed). The caller must invoke this only
-    when no cluster of the cloud is live (see the launch call site), so a
-    concurrent launch's shared socket is never pulled out from under it.
+    (OpenSSH re-creates sockets as needed). Because the clear is user-wide (it
+    removes sockets for every cloud/host of this OS user), the caller must
+    invoke it only when no cluster of ANY HPC cloud is live (see the launch
+    call site), so a concurrent launch's shared socket is never pulled out from
+    under it.
 
     This runs only when opted in (guarded at the call site by the
     ``reset_ssh_on_idle_launch`` environment config key), where the socket root
@@ -1617,15 +1619,21 @@ class Skypilot(Environment):
                 # connection to re-authenticate. Off by default because the socket
                 # root is shared by every SkyPilot SSH connection of this OS user
                 # (wide blast radius); enable it per-environment for clusters that
-                # rotate keys. Additionally gated on this cloud being idle (no
-                # live cluster sharing the login node's socket) so we never pull a
-                # socket out from under an in-flight launch.
+                # rotate keys. Additionally gated on EVERY HPC cloud being idle
+                # (not just this one): because the clear is user-wide, an idle
+                # slurm launch would otherwise yank a live lsf build's shared
+                # ControlMaster socket (and vice versa), forcing that in-flight
+                # build to re-authenticate mid-run — the very collision this
+                # feature exists to prevent.
                 reset_ssh = bool(
                     self.config.config.get("reset_ssh_on_idle_launch", False)
                     if self.config
                     else False
                 )
-                if reset_ssh and live_cluster_count(Path.home(), cloud_group) == 0:
+                all_hpc_idle = all(
+                    live_cluster_count(Path.home(), c) == 0 for c in _SSH_HPC_CLOUDS
+                )
+                if reset_ssh and all_hpc_idle:
                     _clear_skypilot_ssh_control_sockets()
                 acquire_lease(Path.home(), cloud_group, launch_id)
 

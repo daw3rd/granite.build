@@ -1343,6 +1343,36 @@ class TestSshControlSocketClear:
         acq.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_not_cleared_when_other_hpc_cloud_busy(self, slurm_env):
+        # This cloud (slurm) is idle, but the OTHER HPC cloud (lsf) has a live
+        # cluster. The socket clear is user-wide (it removes every cloud's
+        # sockets), so it must be suppressed to avoid yanking the live lsf
+        # build's shared ControlMaster socket — while the slurm lease is still
+        # acquired.
+        slurm_env.config.config["reset_ssh_on_idle_launch"] = True
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch(
+                "gbserver.environment.skypilot_config.live_cluster_count",
+                side_effect=lambda _home, cloud: 1 if cloud == "lsf" else 0,
+            ),
+            patch(
+                "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets"
+            ) as clear,
+            patch("gbserver.environment.skypilot_config.acquire_lease") as acq,
+        ):
+            slurm_env._get_launch_ready_event("other-busy-1")
+            await slurm_env.launch_skypilot(
+                launch_id="other-busy-1",
+                launcher_config={"run": "hostname", "resources": {"cloud": "slurm"}},
+                config={},
+            )
+        clear.assert_not_called()
+        acq.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_not_cleared_when_config_disabled(self, slurm_env):
         # Without reset_ssh_on_idle_launch (the default) the clear never runs,
         # even when the cloud is idle — but the lease is still acquired.
