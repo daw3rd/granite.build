@@ -1,10 +1,16 @@
 import asyncio
+import io
+import os
+import socket
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gbserver.environment.skypilot import Skypilot
+from gbserver.environment.skypilot import (
+    Skypilot,
+    _is_interactive_auth_stdin_failure,
+)
 from gbserver.types.buildevent import (
     BuildEvent,
     BuildEventType,
@@ -12,7 +18,10 @@ from gbserver.types.buildevent import (
     EntityRunMetadata,
 )
 from gbserver.types.environmentconfig import EnvironmentConfig
-from gbserver.types.errors import WorkloadFailedException
+from gbserver.types.errors import (
+    ErrSkypilotInteractiveAuthFailed,
+    WorkloadFailedException,
+)
 from gbserver.types.status import Status
 
 
@@ -1086,3 +1095,346 @@ class TestMonitorTerminalNoRetry:
                 launch_calls,
                 timeout=2,
             )
+
+
+class TestSlurmLease:
+    """The per-cloud usage lease is acquired before provisioning and released
+    on teardown (see skypilot_config: replace-when-idle / refuse-when-busy)."""
+
+    @pytest.fixture
+    def k8s_env(self):
+        config = EnvironmentConfig(
+            name="test-k8s", type="Skypilot", config={"default_cloud": "k8s"}
+        )
+        return Skypilot(event_q=asyncio.Queue(), environment_config=config)
+
+    @pytest.mark.asyncio
+    async def test_lease_acquired_before_launch_for_slurm(self, slurm_env):
+        order = []
+        mock_sky = _mock_sky()
+        mock_sky.launch = MagicMock(
+            side_effect=lambda *a, **k: order.append("launch") or "req-slurm"
+        )
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch(
+                "gbserver.environment.skypilot_config.acquire_lease",
+                side_effect=lambda *a, **k: order.append(("acquire", a)),
+            ) as acq,
+        ):
+            slurm_env._get_launch_ready_event("lease-1")
+            await slurm_env.launch_skypilot(
+                launch_id="lease-1",
+                launcher_config={"run": "hostname", "resources": {"cloud": "slurm"}},
+                config={},
+            )
+        # Acquired exactly once, keyed by cloud + launch_id, before sky.launch.
+        acq.assert_called_once()
+        assert acq.call_args[0][1:] == ("slurm", "lease-1")
+        assert order[0][0] == "acquire" and "launch" in order
+
+    @pytest.mark.asyncio
+    async def test_lease_not_acquired_for_non_hpc_cloud(self, k8s_env):
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot_config.acquire_lease") as acq,
+        ):
+            k8s_env._get_launch_ready_event("lease-k")
+            await k8s_env.launch_skypilot(
+                launch_id="lease-k",
+                launcher_config={"run": "hostname", "resources": {"cloud": "k8s"}},
+                config={},
+            )
+        acq.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lease_released_on_cleanup_before_early_return(self, slurm_env):
+        # No cluster recorded (cancel-before-launch): release must still fire,
+        # for every HPC cloud, ahead of the "no cluster to cleanup" early return.
+        with patch(
+            "gbserver.environment.skypilot_config.release_lease"
+        ) as rel:
+            await slurm_env.cleanup_skypilot(launch_id="lease-2")
+        released = {c.args[1] for c in rel.call_args_list}
+        assert released == {"slurm", "lsf"}
+        assert all(c.args[2] == "lease-2" for c in rel.call_args_list)
+
+
+def _bind_unix_socket(directory, name):
+    """Create a real AF_UNIX socket file ``name`` inside ``directory``.
+
+    Binds with a *relative* path (cwd temporarily set to ``directory``) to stay
+    within the platform's ``sun_path`` length limit (~104 bytes on macOS), which
+    a long pytest ``tmp_path`` would otherwise blow. Closing the socket does not
+    remove the file, so the caller can assert on its (non-)existence afterwards.
+
+    :param directory: pathlib.Path of the (existing) dir to create the socket in.
+    :param name: basename for the socket file.
+    :returns: the bound ``socket.socket`` (kept open; ref held by caller).
+    """
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    cwd = os.getcwd()
+    os.chdir(directory)
+    try:
+        s.bind(name)
+    finally:
+        os.chdir(cwd)
+    return s
+
+
+class TestSshControlSocketClear:
+    """The ControlMaster socket clear runs on every HPC launch while the cloud
+    is idle, forcing the next SSH to re-authenticate against the fresh config;
+    it is skipped while a cluster is live (shared socket must not be disturbed)."""
+
+    def test_socket_dir_shape(self):
+        # Real SDK path: the stable per-user *root* dir, NOT the hashed
+        # control-name subdir (that name is md5(control_name)[:10] on disk, so
+        # we address the root and glob one level deeper — see the clear fn).
+        from gbserver.environment import skypilot
+
+        control_root = skypilot._ssh_control_socket_dir()
+        assert control_root is not None
+        assert os.path.basename(control_root).startswith("skypilot_ssh_")
+        assert not control_root.endswith("/__default__")
+
+    def test_clears_sockets_every_call(self, tmp_path, monkeypatch):
+        from gbserver.environment import skypilot
+
+        # Sockets live one level below the root, under the hashed control name:
+        # <root>/<hashed-control-name>/<%C socket>. The clear globs "*/*".
+        control_root = tmp_path
+        control_name_dir = control_root / "3651d5b8ee"  # md5('__default__')[:10]
+        control_name_dir.mkdir()
+        monkeypatch.setattr(
+            skypilot, "_ssh_control_socket_dir", lambda: str(control_root)
+        )
+
+        s1 = _bind_unix_socket(control_name_dir, "abcd1234")  # noqa: F841
+        skypilot._clear_skypilot_ssh_control_sockets()
+        assert list(control_name_dir.iterdir()) == []
+
+        # No once-guard: a socket that reappears is cleared again next call.
+        s2 = _bind_unix_socket(control_name_dir, "efgh5678")  # noqa: F841
+        skypilot._clear_skypilot_ssh_control_sockets()
+        assert list(control_name_dir.iterdir()) == []
+
+    def test_clears_sockets_across_multiple_control_names(
+        self, tmp_path, monkeypatch
+    ):
+        # Regression for the literal-"__default__" bug: the on-disk control-name
+        # dir is a hash, and there may be more than one; the clear must reach
+        # sockets under any subdir, not a name it reconstructs itself.
+        from gbserver.environment import skypilot
+
+        monkeypatch.setattr(
+            skypilot, "_ssh_control_socket_dir", lambda: str(tmp_path)
+        )
+        socks, keep = [], []
+        for name in ("3651d5b8ee", "0a1b2c3d4e"):
+            d = tmp_path / name
+            d.mkdir()
+            keep.append(_bind_unix_socket(d, "deadbeef"))
+            socks.append(d / "deadbeef")
+
+        skypilot._clear_skypilot_ssh_control_sockets()
+        assert all(not s.exists() for s in socks)
+
+    def test_leaves_non_socket_entries_untouched(self, tmp_path, monkeypatch):
+        # S_ISSOCK guard: a stray regular file or directory at socket depth is
+        # never removed — only actual ControlMaster sockets are.
+        from gbserver.environment import skypilot
+
+        monkeypatch.setattr(
+            skypilot, "_ssh_control_socket_dir", lambda: str(tmp_path)
+        )
+        sub = tmp_path / "3651d5b8ee"
+        sub.mkdir()
+        sock = _bind_unix_socket(sub, "realsock")  # noqa: F841
+        regular = sub / "not-a-socket"
+        regular.write_text("keep me")
+        nested_dir = sub / "subdir"
+        nested_dir.mkdir()
+
+        skypilot._clear_skypilot_ssh_control_sockets()
+
+        assert not (sub / "realsock").exists()  # socket removed
+        assert regular.exists()  # regular file kept
+        assert nested_dir.is_dir()  # directory kept
+
+    def test_warns_when_dir_unavailable(self, monkeypatch, caplog):
+        # The clear runs only in the test scenario, where the socket root is
+        # expected to resolve; an unresolved root signals SkyPilot drift, so we
+        # warn (rather than silently skip) and must not raise.
+        import logging
+
+        from gbserver.environment import skypilot
+
+        monkeypatch.setattr(skypilot, "_ssh_control_socket_dir", lambda: None)
+        with caplog.at_level(logging.WARNING):
+            skypilot._clear_skypilot_ssh_control_sockets()  # must not raise
+        assert any(
+            "control-socket root could not be resolved" in r.message
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_cleared_before_lease_acquire_when_idle(self, slurm_env):
+        # The clear is config-gated: enable reset_ssh_on_idle_launch so the idle
+        # launch clears the socket.
+        slurm_env.config.config["reset_ssh_on_idle_launch"] = True
+        order = []
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch(
+                "gbserver.environment.skypilot_config.live_cluster_count",
+                return_value=0,
+            ),
+            patch(
+                "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets",
+                side_effect=lambda: order.append("clear"),
+            ) as clear,
+            patch(
+                "gbserver.environment.skypilot_config.acquire_lease",
+                side_effect=lambda *a, **k: order.append("acquire"),
+            ),
+        ):
+            slurm_env._get_launch_ready_event("clear-1")
+            await slurm_env.launch_skypilot(
+                launch_id="clear-1",
+                launcher_config={"run": "hostname", "resources": {"cloud": "slurm"}},
+                config={},
+            )
+        clear.assert_called_once()
+        assert order == ["clear", "acquire"]
+
+    @pytest.mark.asyncio
+    async def test_not_cleared_when_cloud_busy(self, slurm_env):
+        # Config key enabled, but a cluster of this cloud is already live: the
+        # shared login-node socket is in use, so the *busy* gate must suppress the
+        # clear — while the lease is still acquired.
+        slurm_env.config.config["reset_ssh_on_idle_launch"] = True
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch(
+                "gbserver.environment.skypilot_config.live_cluster_count",
+                return_value=1,
+            ),
+            patch(
+                "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets"
+            ) as clear,
+            patch("gbserver.environment.skypilot_config.acquire_lease") as acq,
+        ):
+            slurm_env._get_launch_ready_event("busy-1")
+            await slurm_env.launch_skypilot(
+                launch_id="busy-1",
+                launcher_config={"run": "hostname", "resources": {"cloud": "slurm"}},
+                config={},
+            )
+        clear.assert_not_called()
+        acq.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_not_cleared_when_config_disabled(self, slurm_env):
+        # Without reset_ssh_on_idle_launch (the default) the clear never runs,
+        # even when the cloud is idle — but the lease is still acquired.
+        slurm_env.config.config.pop("reset_ssh_on_idle_launch", None)
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch(
+                "gbserver.environment.skypilot_config.live_cluster_count",
+                return_value=0,
+            ),
+            patch(
+                "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets"
+            ) as clear,
+            patch("gbserver.environment.skypilot_config.acquire_lease") as acq,
+        ):
+            slurm_env._get_launch_ready_event("noflag-1")
+            await slurm_env.launch_skypilot(
+                launch_id="noflag-1",
+                launcher_config={"run": "hostname", "resources": {"cloud": "slurm"}},
+                config={},
+            )
+        clear.assert_not_called()
+        acq.assert_called_once()
+
+
+def _raise_from_module(filename: str) -> None:
+    """Raise ``io.UnsupportedOperation`` from a frame whose code filename is ``filename``.
+
+    Compiles a tiny function under a synthetic filename so the resulting
+    traceback carries a frame from that path — reproducing SkyPilot's
+    interactive_utils stdin crash without needing the SDK.
+
+    :param filename: The ``co_filename`` to stamp on the raising frame.
+    :raises io.UnsupportedOperation: always, from the synthetic frame.
+    """
+    src = (
+        "def _boom():\n"
+        "    raise io.UnsupportedOperation("
+        "'redirected stdin is pseudofile, has no fileno()')\n"
+    )
+    namespace = {"io": io}
+    exec(compile(src, filename, "exec"), namespace)
+    namespace["_boom"]()
+
+
+class TestInteractiveAuthErrorTranslation:
+    """Interactive-auth stdin crash is detected and surfaced as an auth error."""
+
+    _SKY_MODULE = "/venv/site-packages/sky/client/interactive_utils.py"
+
+    def test_detects_interactive_auth_frame(self):
+        """A traceback passing through interactive_utils is flagged."""
+        with pytest.raises(io.UnsupportedOperation) as excinfo:
+            _raise_from_module(self._SKY_MODULE)
+        assert _is_interactive_auth_stdin_failure(excinfo.value) is True
+
+    def test_detects_via_context_chain(self):
+        """The signal is found when interactive_utils is only in the chain."""
+        with pytest.raises(RuntimeError) as excinfo:
+            try:
+                _raise_from_module(self._SKY_MODULE)
+            except io.UnsupportedOperation:
+                raise RuntimeError("wrapped by an outer failure")
+        assert _is_interactive_auth_stdin_failure(excinfo.value) is True
+
+    def test_ignores_unrelated_error(self):
+        """A genuine error with no interactive_utils frame is not relabeled."""
+        with pytest.raises(ValueError) as excinfo:
+            raise ValueError("some unrelated value error")
+        assert _is_interactive_auth_stdin_failure(excinfo.value) is False
+
+    def test_translated_message_surfaces_over_stdin_cause(self):
+        """unwrap_errors surfaces the clear auth message, not the stdin crash.
+
+        The translation raises ErrSkypilotInteractiveAuthFailed WITHOUT
+        ``from e`` so ``__cause__`` stays None (unwrap_errors follows
+        ``__cause__``) while ``__context__`` preserves the original for the
+        stack trace.
+        """
+        from gbserver.utils.unwrap_errors import unwrap_errors
+
+        with pytest.raises(ErrSkypilotInteractiveAuthFailed) as excinfo:
+            try:
+                _raise_from_module(self._SKY_MODULE)
+            except io.UnsupportedOperation:
+                raise ErrSkypilotInteractiveAuthFailed(
+                    "SSH authentication to the slurm login node failed: bad key"
+                )
+        err = excinfo.value
+        assert err.__cause__ is None
+        assert err.__context__ is not None  # original preserved for the trace
+        readable = unwrap_errors(err)
+        assert "SSH authentication" in readable
+        assert "fileno" not in readable

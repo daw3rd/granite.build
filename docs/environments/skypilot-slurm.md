@@ -40,6 +40,21 @@ Keys are the **exact OpenSSH directive names**, so the env mirrors `~/.slurm/con
 via a secret — gbserver writes a `0600` file and points `IdentityFile` at it); specifying both is an
 error. The SSH private key and the cluster itself stay out-of-band — gbserver does not provision them.
 
+gbserver merges this block into `~/.slurm/config` under a per-cloud usage lease: when no SLURM cluster
+is live it **replaces** a differing managed block for the same alias (so a stale or re-keyed entry
+self-heals — no manual `rm ~/.slurm/config`); while a cluster is live, a *different* config is refused.
+See [Inline SkyPilot config](skypilot.md#inline-skypilot-config-cluster_ssh_configs--cloud_config--aws_credentials).
+
+> **Re-keying caveat — `reset_ssh_on_idle_launch`.** Even after `~/.slurm/config` self-heals, SkyPilot
+> reuses a persisted SSH ControlMaster socket keyed on `(host, port, user)` — **not** the key — so a
+> changed `IdentityFile`/`IdentityKey` can be masked by a live connection until its `ControlPersist`
+> window expires (300s, or up to 1 day on the interactive-auth path). Set the **default-off**
+> `reset_ssh_on_idle_launch: true` environment config key to make gbserver clear those sockets before
+> each launch of an **idle** HPC cloud (no cluster of that cloud live), forcing re-authentication
+> against the current key. It is off by default because the socket root is shared by all of the OS
+> user's SkyPilot SSH connections; the `skypilot/slurm/ibm-bluevela` environment enables it (which is
+> also what lets its 1-step live test validate key changes).
+
 ### `cluster` / `zone`
 
 - `cluster` is composed into `infra=slurm/<cluster>` for steps that don't set their own

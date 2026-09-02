@@ -35,6 +35,12 @@ from libgbtest.constants import extended_testing_only
 
 pytestmark = pytest.mark.ibm
 
+# NOTE: SSH auth is validated against the currently materialized key on every
+# launch because the ibm-bluevela environment.yaml sets
+# `reset_ssh_on_idle_launch: true` — SkyPilot otherwise reuses a persisted SSH
+# ControlMaster socket keyed on (host, port, user), not the key, masking an
+# edited cluster_ssh_config for the ControlPersist window.
+
 
 @extended_testing_only
 @pytest.mark.xdist_group(name="buildtest_bv")

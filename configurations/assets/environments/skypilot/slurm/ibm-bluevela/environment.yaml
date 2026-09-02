@@ -21,6 +21,10 @@ config:
   # as GB_BUILD_WORKDIR, and makes it the CWD of both the setup and run scripts.
   # Reuses the LSF BlueVela shared /proj path (same cluster filesystem).
   shared_workdir: /proj/data-eng/llmb-read-write/builds/
+  # Clear SkyPilot's persisted SSH ControlMaster sockets before each idle launch
+  # of this cloud so a re-keyed cluster_ssh_config re-authenticates instead of
+  # silently reusing a stale connection. 
+  reset_ssh_on_idle_launch: true 
   # Inline SLURM cluster SSH reachability. gbserver materializes this into
   # ~/.slurm/config at launch so SkyPilot's SLURM provisioner can reach the login
   # node and enumerate partitions/nodes. Keys are the exact OpenSSH directive
@@ -28,13 +32,22 @@ config:
   # Reuses the LSF BlueVela credentials/key; only HostName differs (login1, the
   # SLURM login node, vs login4 for LSF). Use `IdentityKey: BV_SSH_PRIVATE_KEY`
   # (a secret) instead of IdentityFile for CI/CD where no key is on the host.
+  #
+  # NOTE: SkyPilot reuses a persisted SSH ControlMaster socket keyed on
+  # (host, port, user) — NOT the key — so switching the IdentityFile/IdentityKey
+  # below can be masked by a stale connection for the ControlPersist window. The
+  # `reset_ssh_on_idle_launch: true` above makes gbserver clear those sockets on
+  # each idle launch so the changed config re-authenticates (also what lets the
+  # slurm_bluevela 1-step live test validate the currently materialized key).
   cluster_ssh_configs:
     slurm:
       - Host: bluevela
         HostName: login1.bluevela.rmf.ibm.com
         User: granitebuild
-        #IdentityFile: ~/.ssh/ibm-bluevela.key
-        IdentityKey: BV_SSH_PRIVATE_KEY
+        # Set reset_ssh_on_idle_launch true above when testing modified credentials. 
+        IdentityFile: ~/.ssh/ibm-bluevela.key
+        #IdentityFile: ~/.ssh/cogops_bv.key
+        #IdentityKey: BV_SSH_PRIVATE_KEY
         IdentitiesOnly: "yes"
 assetstores:
   - store_uri: space://assetstores/hf
