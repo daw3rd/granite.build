@@ -40,20 +40,21 @@ config:
                                     # on-host key path. Specifying both is an error.
 ```
 
-gbserver merges this block into `~/.lsf/config` under a per-cloud usage lease: when no LSF cluster is
-live it **replaces** a differing managed block for the same alias (a stale or re-keyed entry self-heals
-— no manual `rm ~/.lsf/config`); while a cluster is live, a *different* config is refused. An LSF and a
-SLURM env run concurrently (separate files). See
+gbserver merges this block into `~/.lsf/config` with last-writer-wins semantics: a differing
+gbserver-managed block for the same alias is **overwritten** (a stale or re-keyed entry self-heals —
+no manual `rm ~/.lsf/config`); a *foreign* (non-gbserver) entry for the same alias is refused
+(`SkypilotConfigCollisionError`). An LSF and a SLURM env run concurrently (separate files). See
 [Inline SkyPilot config](skypilot.md#inline-skypilot-config-cluster_ssh_configs--cloud_config--aws_credentials).
 
-> **Re-keying caveat — `reset_ssh_on_idle_launch`.** Even after `~/.lsf/config` self-heals, SkyPilot
-> reuses a persisted SSH ControlMaster socket keyed on `(host, port, user)` — **not** the key — so a
-> changed `IdentityFile`/`IdentityKey` can be masked by a live connection until its `ControlPersist`
-> window expires (300s, or up to 1 day on the interactive-auth path). Set the **default-off**
-> `reset_ssh_on_idle_launch: true` environment config key to make gbserver clear those sockets before
-> each launch of an **idle** LSF cloud (no cluster live), forcing re-authentication against the current
-> key. It is off by default because the socket root is shared by all of the OS user's SkyPilot SSH
-> connections; enable it while testing modified credentials.
+> **Re-keying caveat (test-only `GBTEST_SKY_SSH_RESET`).** Even after `~/.lsf/config` self-heals,
+> SkyPilot reuses a persisted SSH ControlMaster socket keyed on `(host, port, user)` — **not** the key
+> — so a changed `IdentityFile`/`IdentityKey` can be masked by a live connection until its
+> `ControlPersist` window expires (300s, or up to 1 day on the interactive-auth path). To validate a
+> credential change against a freshly edited key, set `GBTEST_SKY_SSH_RESET=true` in gbserver's
+> environment: on each HPC launch gbserver then clears the persisted control sockets first, forcing
+> re-authentication with the current key. This is a **test-only** toggle (manually set, unconditional
+> — not idle-gated); production never clears sockets, since the socket root is shared by all of the OS
+> user's SkyPilot SSH connections. It is not an environment-config key.
 
 ### `cloud_config.lsf` — behavioral tuning
 

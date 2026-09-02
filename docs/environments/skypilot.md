@@ -371,23 +371,20 @@ pre-provisioning SkyPilot config files on the gbserver host, gbserver materializ
   SLURM env and an LSF env run concurrently (separate files). An *identical* pre-existing entry is a
   no-op; a *foreign* (non-gbserver) entry for the same alias always conflicts
   (`SkypilotConfigCollisionError`) — gbserver never overwrites user-owned entries.
-- **Replace-when-idle / refuse-when-busy (SSH `Host` blocks).** SkyPilot re-reads
-  `~/.<cloud>/config` for a cluster's whole lifetime, so a *differing* gbserver-managed block for the
-  same alias is only rewritten when nothing depends on the old content. A per-cloud **usage lease**
-  (`~/.sky/gbserver-leases/<cloud>.json`) records each live cluster (acquired before provisioning,
-  released at teardown): with **no** live cluster of that cloud, a differing block is **replaced**
-  (self-heals a stale or re-keyed entry left by an earlier run — no manual `rm`); with a live cluster,
-  a differing block is **refused** (`SkypilotConfigCollisionError`). Consequence: only one config per
-  cluster-type is active at a time — a second, *different* SLURM (or LSF) config while one is live is
-  refused, whereas the *same* config is shared freely by concurrent steps/builds.
-- **Stale-lease reclaim.** A holder whose PID is dead, or older than a TTL backstop
-  (`LEASE_TTL_SECONDS`, guards PID reuse), is pruned, so a crashed build cannot wedge the cloud.
-  Single-host by design (the config files are host-local).
-- **No config teardown.** Materialized config files are left in place (safe and idempotent); only the
-  lease holder is released on completion.
-- **Concurrency.** Host-shared files and the lease store are guarded by a cross-process file lock plus
-  an in-process thread lock, so materialization is safe for any `GBSERVER_DEFAULT_BUILDRUNNER_TYPE`
-  (thread/process/job).
+- **Last-writer-wins (SSH `Host` blocks).** A *differing* gbserver-managed block for the same alias is
+  **overwritten** — this self-heals a stale or re-keyed entry left by an earlier run, so no manual `rm`
+  is ever needed. The *same* block is a no-op (shared freely by concurrent steps/builds). Only a
+  *foreign* (non-gbserver) entry for the same alias is refused (`SkypilotConfigCollisionError`).
+- **No config teardown.** Materialized config files are left in place (safe and idempotent). Single-host
+  by design (the config files are host-local).
+- **Concurrency.** Host-shared files are guarded by a per-cloud cross-process file lock
+  (`gbserver-<cloud>.lock`) plus an in-process thread lock, so materialization is safe for any
+  `GBSERVER_DEFAULT_BUILDRUNNER_TYPE` (thread/process/job).
+- **Re-keying (test-only `GBTEST_SKY_SSH_RESET`).** SkyPilot reuses a persisted SSH ControlMaster
+  socket keyed on `(host, port, user)` — **not** the key — so a re-keyed HPC config can be masked by a
+  live connection for its `ControlPersist` window. Setting `GBTEST_SKY_SSH_RESET=true` makes gbserver
+  clear those sockets before each HPC launch, forcing re-authentication. Test-only (manually set,
+  unconditional); production never clears sockets. It is not an environment-config key.
 
 The exact contents of each block are cloud-specific — see the per-cloud pages:
 [SLURM](skypilot-slurm.md) and [LSF](skypilot-lsf.md) use `cluster_ssh_configs` (and LSF often

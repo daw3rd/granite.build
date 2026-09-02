@@ -1658,8 +1658,9 @@ class Skypilot(Environment):
             # (normalized first infra segment) computed above.
             autostop = None if cloud_group in _SSH_HPC_CLOUDS else idle_minutes
 
-            # (The per-cloud usage lease + opt-in SSH-socket clear were acquired
-            # earlier, before the SSH config was materialized — see above.)
+            # (The opt-in SSH-socket clear, if GBTEST_SKY_SSH_RESET is set, ran
+            # earlier via _prepare_ssh_for_launch, before the SSH config was
+            # materialized — see above.)
 
             # Launch and wait for provisioning, retrying transient
             # resource-acquisition failures (e.g. a just-torn-down slurm/lsf
