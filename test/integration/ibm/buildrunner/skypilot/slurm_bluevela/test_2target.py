@@ -38,11 +38,16 @@ from libgbtest.constants import extended_testing_only
 
 pytestmark = pytest.mark.ibm
 
-# NOTE: SSH auth is validated against the currently materialized key on every
-# launch because the ibm-bluevela environment.yaml sets
-# `reset_ssh_on_idle_launch: true` — SkyPilot otherwise reuses a persisted SSH
-# ControlMaster socket keyed on (host, port, user), not the key, masking an
-# edited cluster_ssh_config for the ControlPersist window.
+# NOTE: to validate SSH auth against a freshly edited key/credential, set
+# GBTEST_SKY_SSH_RESET=true in gbserver's environment before running — SkyPilot
+# otherwise reuses a persisted SSH ControlMaster socket keyed on
+# (host, port, user), not the key, masking an edited cluster_ssh_config for the
+# ControlPersist window. This is intentionally NOT an autouse fixture: the
+# socket clear globs the whole per-user root (/tmp/skypilot_ssh_<hash>/*/*), so
+# forcing it on every run could yank the ControlMaster socket of another
+# skypilot build (e.g. an AWS test) running in parallel on a different xdist
+# group. Leave it unset for normal runs (the key is unchanged); set it manually
+# only when testing a credential change.
 
 
 @extended_testing_only

@@ -12,12 +12,6 @@ config:
   # step's relative file_mounts destination — remapped under this dir — is
   # visible inside the container at the same relative path.
   shared_workdir: /proj/data-eng/llmb-read-write/builds/
-  # Clear SkyPilot's persisted SSH ControlMaster sockets before each idle launch
-  # of this cloud so a re-keyed cluster_ssh_config re-authenticates instead of
-  # silently reusing a stale connection. Set true when testing modified
-  # credentials; default false in production (the socket root is shared by all of
-  # the OS user's SkyPilot SSH connections).
-  reset_ssh_on_idle_launch: false
   # SkyPilot's `zone` is overloaded per-cloud: for the LSF backend it
   # maps to the LSF queue name (e.g. `normal`, `preemptable`). Recipes
   # that expose a `QUEUE` build parameter plumb it through `zone`.
@@ -35,15 +29,16 @@ config:
   #
   # NOTE: SkyPilot reuses a persisted SSH ControlMaster socket keyed on
   # (host, port, user) — NOT the key — so switching the IdentityFile/IdentityKey
-  # below can be masked by a stale connection for the ControlPersist window. Set
-  # `reset_ssh_on_idle_launch: true` above to make gbserver clear those sockets
-  # on each idle launch so the changed config re-authenticates.
+  # below can be masked by a stale connection for the ControlPersist window. When
+  # testing a modified key/credential, set GBTEST_SKY_SSH_RESET=true in gbserver's
+  # environment so it clears those sockets before the launch and the changed
+  # config re-authenticates. Unset in production.
   cluster_ssh_configs:
     lsf:
       - Host: bluevela
         HostName: login4.bluevela.rmf.ibm.com
         User: granitebuild
-        # Set reset_ssh_on_idle_launch true above when testing modified credentials.
+        # Set GBTEST_SKY_SSH_RESET=true (env) when testing modified credentials.
         IdentityFile: ~/.ssh/ibm-bluevela.key
         # IdentityKey: BV_SSH_PRIVATE_KEY 
         IdentitiesOnly: "yes"

@@ -122,10 +122,41 @@ def disable_failure_simulation() -> None:
     os.environ.pop(ENV_VAR_GBTEST_SIMULATE_FAILURE_SCENARIO, None)
 
 
+# Triggers a one-shot clear of SkyPilot's cached SSH ControlMaster sockets before
+# an HPC (SLURM/LSF) launch. Those sockets are keyed on (host, port, user) — NOT
+# the key — so a re-keyed cluster_ssh_config is masked by a live socket until it
+# expires. Tests validating an SSH key/credential change set this so SkyPilot
+# re-authenticates against the freshly-materialized config instead of reusing a
+# stale connection. Off (and a no-op) in production, where SkyPilot's own socket
+# management is left untouched. Read at call time so tests can toggle it without
+# patching; forwarded to remote jobs/pods via get_exported_gbtest_env_vars().
+ENV_VAR_GBTEST_SKY_SSH_RESET = f"{_GBTEST_PREFIX}SKY_SSH_RESET"
+
+
+def is_sky_ssh_reset_enabled() -> bool:
+    """Return True if SkyPilot SSH socket reset is enabled (GBTEST_SKY_SSH_RESET=true)."""
+    return os.getenv(ENV_VAR_GBTEST_SKY_SSH_RESET, "").lower() == "true"
+
+
+def enable_sky_ssh_reset() -> None:
+    """Enable SkyPilot SSH socket reset for this process and any remote jobs/pods.
+
+    Sets GBTEST_SKY_SSH_RESET in the environment; also forwarded to remote pods
+    via get_exported_gbtest_env_vars().
+    """
+    os.environ[ENV_VAR_GBTEST_SKY_SSH_RESET] = "true"
+
+
+def disable_sky_ssh_reset() -> None:
+    """Disable SkyPilot SSH socket reset by removing GBTEST_SKY_SSH_RESET from the environment."""
+    os.environ.pop(ENV_VAR_GBTEST_SKY_SSH_RESET, None)
+
+
 # The set of all GBTEST_ env var names defined in this module.
 _GBTEST_EXPORTED_ENV_VARS = {
     ENV_VAR_GBTEST_MOCKED_HF_OPS,
     ENV_VAR_GBTEST_SIMULATE_FAILURE_SCENARIO,
+    ENV_VAR_GBTEST_SKY_SSH_RESET,
 }
 
 

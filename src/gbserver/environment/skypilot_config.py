@@ -19,23 +19,18 @@
 Write/merge-only. Three destinations are supported:
 
   * ``cluster_ssh_configs`` -> ``~/.<cloud>/config`` (OpenSSH ``Host`` blocks,
-    merged by alias under a cross-process file lock; a foreign entry, or a
-    differing gbserver-managed entry *while a cluster of that cloud is live*,
-    raises ``SkypilotConfigCollisionError``).
-
-SkyPilot's SLURM/LSF provisioners re-read the single ``~/.<cloud>/config`` file
-for a cluster's whole lifetime, so a differing managed block for the same alias
-may only be rewritten when nothing depends on the old content. A per-cloud
-**usage lease** (``~/.sky/gbserver-leases/<cloud>.json``) tracks that: each live
-cluster registers a holder keyed by ``launch_id`` (``acquire_lease`` before
-provisioning, ``release_lease`` at teardown, ``refresh_lease`` as a heartbeat
-while it runs). The merge then applies replace-when-idle / refuse-when-busy: same
-content is a no-op; differing content with **no** live holder replaces the stale
-block (self-heals a re-keyed entry); differing content **with** a live holder is
-refused. Holders whose PID is dead or whose last heartbeat is older than
-``LEASE_TTL_SECONDS`` are pruned, so a build that ends without releasing (or a
-crashed process) cannot wedge the cloud for longer than one TTL. Single-host by
-design (the config files are host-local).
+    merged by alias under a cross-process file lock). A **foreign** (non-gbserver)
+    entry with differing content raises ``SkypilotConfigCollisionError`` —
+    gbserver never clobbers a user's own hosts. A prior **gbserver-managed** block
+    with differing content is overwritten (last-writer-wins), self-healing a
+    re-keyed entry; identical content is a no-op. SkyPilot re-reads the single
+    ``~/.<cloud>/config`` for a cluster's whole lifetime, and it caches SSH
+    ControlMaster sockets keyed on (host, port, user) — NOT the key — so a
+    re-keyed config is masked by a live socket until it expires. Clearing that
+    socket so a credential change actually takes effect is a test-only concern,
+    gated by ``GBTEST_SKY_SSH_RESET`` (see ``gbserver.environment.skypilot``);
+    production leaves SkyPilot's socket management untouched. Single-host by
+    design (the config files are host-local).
   * ``cloud_config`` -> ``~/.sky/config.yaml`` (deep-merged into the global
     SkyPilot config the API server / optimizer reads directly; the env's values
     win, unrelated keys are preserved).
@@ -50,10 +45,8 @@ pure-filesystem (no ``sky`` import) so it is unit-testable without the SDK.
 import configparser
 import hashlib
 import io
-import json
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -83,16 +76,6 @@ _OWNER_PREFIX = "# gbserver-owner="
 # adds cross-process safety (filelock alone does not serialize same-process
 # threads).
 _THREAD_LOCK = threading.RLock()
-
-# A lease holder whose last heartbeat (``ts``) is older than this (seconds) is
-# treated as stale and pruned, even if its PID appears alive — this is what
-# reclaims a same-process leak (a build that ended without ``release_lease``),
-# since the server PID stays alive for every lease. A live cluster keeps its
-# lease fresh via ``refresh_lease`` on each monitor poll (≤ the poll interval,
-# 300s by default), so the TTL need only exceed the LONGEST gap between
-# heartbeats — the pre-monitor provisioning/queue window and the retry-relaunch
-# wait (``RETRY_RELAUNCH_TIMEOUT_SECONDS`` = 30 min) — NOT the whole build.
-LEASE_TTL_SECONDS = 60 * 60
 
 
 # --------------------------------------------------------------------------- #
@@ -381,26 +364,23 @@ def _merge_ssh(
     foreign_blocks: Dict[str, Tuple[str, str]],
     env_name: str,
     dest: str,
-    can_replace: bool,
 ) -> Dict[str, Tuple[str, str]]:
     """Merge incoming alias blocks into existing; raise only on a real conflict.
 
     Content-aware: a pre-existing entry for the same alias with identical content
     is a no-op. A **foreign** (non-gbserver) entry with differing content always
     conflicts — gbserver never overwrites user-owned entries. A prior
-    **gbserver-managed** block with differing content is replaced when
-    ``can_replace`` (no cluster of that cloud is live) and refused otherwise.
+    **gbserver-managed** block with differing content is overwritten
+    (last-writer-wins), self-healing a stale or re-keyed entry.
 
     :param existing: Current ``{alias: (block, owner)}`` from the managed region.
     :param incoming: New ``{alias: block}`` to merge in.
     :param foreign_blocks: ``{alias: (block, owner)}`` parsed from non-managed content.
     :param env_name: The contributing environment name.
     :param dest: Destination file path (for messages).
-    :param can_replace: True when no live cluster depends on the current managed
-        block, so a differing managed block may be replaced rather than refused.
     :returns: The merged ``{alias: (block, owner)}`` (foreign-equivalent aliases omitted).
-    :raises SkypilotConfigCollisionError: On a foreign clash, or a differing
-        managed block while a cluster of that cloud is live (``can_replace`` False).
+    :raises SkypilotConfigCollisionError: On a foreign clash (differing content in
+        a non-gbserver entry for the same alias).
     """
     merged = dict(existing)
     for alias, block in incoming.items():
@@ -415,19 +395,11 @@ def _merge_ssh(
                 )
             # Identical foreign entry already provides this host — leave it as-is.
             continue
-        if alias in merged:
-            old_block, old_owner = merged[alias]
-            if _blocks_equivalent(old_block, block):
-                continue
-            if not can_replace:
-                _raise_collision(
-                    "SSH Host",
-                    alias,
-                    env_name,
-                    f"'{old_owner or 'an existing entry'}'",
-                    dest,
-                )
-            # No live cluster depends on the stale block — replace it in place.
+        if alias in merged and _blocks_equivalent(merged[alias][0], block):
+            # Identical managed block already present — no-op (avoids a rewrite
+            # and preserves the recorded owner).
+            continue
+        # New alias, or a differing managed block: (over)write it (self-heal).
         merged[alias] = (block, env_name)
     return merged
 
@@ -453,141 +425,6 @@ def _write_atomic(path: Path, text: str, mode: Optional[int] = None) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Per-cloud usage lease (live-cluster tracking; see module docstring)
-# --------------------------------------------------------------------------- #
-def _lease_path(home_path: Path, cloud: str) -> Path:
-    """Return the lease store file for ``cloud`` under ``~/.sky/gbserver-leases``."""
-    return home_path / ".sky" / "gbserver-leases" / f"{cloud}.json"
-
-
-def _pid_alive(pid: Optional[int]) -> bool:
-    """Return True if a process with ``pid`` currently exists on this host.
-
-    :param pid: Process id recorded by a lease holder (``None``/invalid -> dead).
-    :returns: True if the signal-0 probe succeeds or is denied (EPERM — the
-        process exists but is owned by another user); False if no such process.
-    """
-    if not isinstance(pid, int):
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def _read_live_holders(home_path: Path, cloud: str) -> Dict[str, dict]:
-    """Load the lease store for ``cloud`` and drop stale holders (no locking).
-
-    Callers already holding the cloud lock use this directly; the public
-    ``acquire_lease``/``release_lease``/``live_cluster_count`` take the lock.
-
-    :param home_path: Home directory the store lives under.
-    :param cloud: Cloud name (``slurm``/``lsf``).
-    :returns: ``{launch_id: {"pid": int, "ts": float}}`` with dead-PID and
-        TTL-expired entries removed. Missing/corrupt store -> ``{}``.
-    """
-    path = _lease_path(home_path, cloud)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError, OSError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    now = time.time()
-    live = {}
-    for launch_id, holder in raw.items():
-        if not isinstance(holder, dict):
-            continue
-        ts = holder.get("ts", 0)
-        pid = holder.get("pid")
-        # A partially-written or tampered holder can carry a non-numeric ts;
-        # ``now - ts`` would raise TypeError and escape the corrupt-store
-        # recovery above, so drop such a holder as untrusted/stale. (``bool`` is
-        # an ``int`` subclass and supports the subtraction, so it needs no guard;
-        # a stray ``True``/``False`` prunes as stale below.) ``pid`` needs no
-        # guard — ``_pid_alive`` already treats a non-int pid as dead.
-        if not isinstance(ts, (int, float)):
-            continue
-        if now - ts > LEASE_TTL_SECONDS:
-            continue
-        if not _pid_alive(pid):
-            continue
-        live[launch_id] = holder
-    return live
-
-
-def acquire_lease(home_path: Path, cloud: str, launch_id: str) -> None:
-    """Register a live-cluster holder for ``launch_id`` (idempotent refresh).
-
-    Call just before provisioning so a concurrent, differing-config build of the
-    same cloud is refused at its own merge. Re-acquiring the same ``launch_id``
-    (e.g. on relaunch) simply refreshes its timestamp.
-
-    :param home_path: Home directory the store lives under.
-    :param cloud: Cloud name (``slurm``/``lsf``).
-    :param launch_id: The launch this holder represents.
-    """
-    with _THREAD_LOCK, _lock_for(home_path, f"gbserver-{cloud}.lock"):
-        holders = _read_live_holders(home_path, cloud)
-        holders[launch_id] = {"pid": os.getpid(), "ts": time.time()}
-        _write_atomic(_lease_path(home_path, cloud), json.dumps(holders))
-
-
-def release_lease(home_path: Path, cloud: str, launch_id: str) -> None:
-    """Drop the holder for ``launch_id`` (idempotent; no-op if absent).
-
-    Safe on the cancel-before-launch path where no holder was ever acquired.
-
-    :param home_path: Home directory the store lives under.
-    :param cloud: Cloud name (``slurm``/``lsf``).
-    :param launch_id: The launch whose holder to release.
-    """
-    with _THREAD_LOCK, _lock_for(home_path, f"gbserver-{cloud}.lock"):
-        holders = _read_live_holders(home_path, cloud)
-        if holders.pop(launch_id, None) is None:
-            return
-        _write_atomic(_lease_path(home_path, cloud), json.dumps(holders))
-
-
-def refresh_lease(home_path: Path, cloud: str, launch_id: str) -> None:
-    """Heartbeat: bump the timestamp of an EXISTING holder for ``launch_id``.
-
-    Called periodically while a cluster is live (e.g. each monitor poll) so its
-    lease does not age past ``LEASE_TTL_SECONDS`` and get pruned as stale. Unlike
-    ``acquire_lease`` this never creates a holder — it only extends one already
-    registered — so a released or already-expired lease is never resurrected.
-
-    :param home_path: Home directory the store lives under.
-    :param cloud: Cloud name (``slurm``/``lsf``).
-    :param launch_id: The launch whose holder to refresh; no-op if not present
-        (released, expired, or a cloud this launch never held).
-    """
-    with _THREAD_LOCK, _lock_for(home_path, f"gbserver-{cloud}.lock"):
-        holders = _read_live_holders(home_path, cloud)
-        holder = holders.get(launch_id)
-        if holder is None:
-            return
-        holder["ts"] = time.time()
-        _write_atomic(_lease_path(home_path, cloud), json.dumps(holders))
-
-
-def live_cluster_count(home_path: Path, cloud: str) -> int:
-    """Return the number of live clusters holding a lease for ``cloud``.
-
-    :param home_path: Home directory the store lives under.
-    :param cloud: Cloud name (``slurm``/``lsf``).
-    :returns: Count of non-stale holders.
-    """
-    with _THREAD_LOCK, _lock_for(home_path, f"gbserver-{cloud}.lock"):
-        return len(_read_live_holders(home_path, cloud))
-
-
-# --------------------------------------------------------------------------- #
 # Merge entry points (file I/O under locks)
 # --------------------------------------------------------------------------- #
 def merge_ssh_blocks(
@@ -595,35 +432,26 @@ def merge_ssh_blocks(
     alias_blocks: Dict[str, str],
     env_name: str,
     home: Optional[Path] = None,
-    launch_id: Optional[str] = None,
 ) -> None:
     """Merge rendered SSH ``Host`` blocks into ``~/.<cloud>/config``.
+
+    Idempotent last-writer-wins: an identical managed block is a no-op; a
+    differing gbserver-managed block is overwritten (self-heals a re-keyed
+    entry); a differing **foreign** (non-gbserver) entry raises. Serialized
+    across threads and processes by the per-cloud file lock.
 
     :param cloud: Cloud name (``slurm``/``lsf``) -> ``~/.<cloud>/config``.
     :param alias_blocks: ``{alias: block}`` to merge.
     :param env_name: The contributing environment name.
     :param home: Home dir override (tests).
-    :param launch_id: The launch performing this merge, if any. Its own live
-        lease is excluded from the replace check so re-materializing over a
-        stale/dead block still works; a concurrent DIFFERING launch's lease
-        (acquired before its merge) still blocks the replace. ``None`` (non-launch
-        callers/tests) means any live holder blocks a replace.
-    :raises SkypilotConfigCollisionError: On a foreign clash, or a differing
-        managed block while another cluster of that cloud is live.
+    :raises SkypilotConfigCollisionError: On a foreign clash (a non-gbserver
+        entry for the same alias with differing content).
     """
     if not alias_blocks:
         return
     home_path = _home(home)
     dest = home_path / f".{cloud}" / "config"
     with _THREAD_LOCK, _lock_for(home_path, f"gbserver-{cloud}.lock"):
-        # A differing managed block may be replaced only when no OTHER live
-        # cluster of this cloud depends on it. Read under the same lock we hold
-        # (the lock-free reader; live_cluster_count would re-enter the FileLock)
-        # and exclude this launch's own holder — acquired before this merge — so
-        # re-materializing over its own stale block still works, while a
-        # concurrent differing launch's holder refuses the overwrite.
-        holders = _read_live_holders(home_path, cloud)
-        can_replace = not any(lid != launch_id for lid in holders)
         text = dest.read_text(encoding="utf-8") if dest.exists() else ""
         foreign, existing = _parse_managed(text)
         merged = _merge_ssh(
@@ -632,7 +460,6 @@ def merge_ssh_blocks(
             _parse_host_blocks(foreign),
             env_name,
             str(dest),
-            can_replace,
         )
         if merged == existing:
             # Nothing new to manage (e.g. every incoming alias already exists as an
@@ -772,24 +599,19 @@ def materialize_ssh_for_cloud(
     cloud: str,
     *,
     home: Optional[Path] = None,
-    launch_id: Optional[str] = None,
 ) -> None:
     """Merge one cloud's inline SSH ``Host`` blocks into ``~/.<cloud>/config``.
 
     Extracted from :func:`materialize` so a launch can (re-)merge just the cloud
-    it is provisioning, under the per-cloud lease it already holds — the replace
-    check then excludes that launch's own holder (see :func:`merge_ssh_blocks`).
-    No-op when the config defines no hosts for ``cloud``.
+    it is provisioning. No-op when the config defines no hosts for ``cloud``.
 
     :param env_name: The environment name (used in messages).
     :param ssh: Inline cluster SSH configs.
     :param secrets: Secret name -> value mapping for field resolution.
     :param cloud: ``"slurm"`` or ``"lsf"`` — the cloud whose hosts to merge.
     :param home: Home dir override (tests).
-    :param launch_id: The launch performing this merge, if any. Forwarded to
-        ``merge_ssh_blocks`` (see that function).
-    :raises SkypilotConfigCollisionError: On a foreign clash, or a differing
-        managed block while another cluster of ``cloud`` is live.
+    :raises SkypilotConfigCollisionError: On a foreign clash (see
+        :func:`merge_ssh_blocks`).
     """
     hosts = {"slurm": ssh.slurm, "lsf": ssh.lsf}.get(cloud)
     if not hosts:
@@ -802,7 +624,6 @@ def materialize_ssh_for_cloud(
         render_ssh_hosts(hosts, secrets),
         env_name,
         home=home,
-        launch_id=launch_id,
     )
 
 
@@ -814,7 +635,6 @@ def materialize(
     secrets: Dict[str, str],
     *,
     home: Optional[Path] = None,
-    launch_id: Optional[str] = None,
 ) -> None:
     """Materialize all inline config sections for one environment.
 
@@ -829,15 +649,10 @@ def materialize(
     :param aws_credentials: Inline AWS credential profiles, or ``None``.
     :param secrets: Secret name -> value mapping for field resolution.
     :param home: Home dir override (tests).
-    :param launch_id: The launch driving this materialization, if any. Forwarded
-        to ``merge_ssh_blocks`` so its own live lease is excluded from the
-        replace check (see that function).
     """
     if ssh:
         for cloud in ("slurm", "lsf"):
-            materialize_ssh_for_cloud(
-                env_name, ssh, secrets, cloud, home=home, launch_id=launch_id
-            )
+            materialize_ssh_for_cloud(env_name, ssh, secrets, cloud, home=home)
     if cloud_config:
         merge_cloud_config(cloud_config, env_name, home=home)
     if aws_credentials:

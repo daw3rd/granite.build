@@ -1106,80 +1106,6 @@ class TestMonitorTerminalNoRetry:
             )
 
 
-class TestSlurmLease:
-    """The per-cloud usage lease is acquired before provisioning and released
-    on teardown (see skypilot_config: replace-when-idle / refuse-when-busy)."""
-
-    @pytest.fixture
-    def k8s_env(self):
-        config = EnvironmentConfig(
-            name="test-k8s", type="Skypilot", config={"default_cloud": "k8s"}
-        )
-        return Skypilot(event_q=asyncio.Queue(), environment_config=config)
-
-    @pytest.mark.asyncio
-    async def test_lease_acquired_before_launch_for_slurm(self, slurm_env):
-        order = []
-        mock_sky = _mock_sky()
-        mock_sky.launch = MagicMock(
-            side_effect=lambda *a, **k: order.append("launch") or "req-slurm"
-        )
-        with (
-            patch("gbserver.environment.skypilot.sky", mock_sky),
-            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
-            patch(
-                "gbserver.environment.skypilot_config.acquire_lease",
-                side_effect=lambda *a, **k: order.append(("acquire", a)),
-            ) as acq,
-        ):
-            slurm_env._get_launch_ready_event("lease-1")
-            await slurm_env.launch_skypilot(
-                launch_id="lease-1",
-                launcher_config={"run": "hostname", "resources": {"cloud": "slurm"}},
-                config={},
-            )
-        # Acquired exactly once, keyed by cloud + launch_id, before sky.launch.
-        acq.assert_called_once()
-        assert acq.call_args[0][1:] == ("slurm", "lease-1")
-        assert order[0][0] == "acquire" and "launch" in order
-
-    @pytest.mark.asyncio
-    async def test_lease_not_acquired_for_non_hpc_cloud(self, k8s_env):
-        mock_sky = _mock_sky()
-        with (
-            patch("gbserver.environment.skypilot.sky", mock_sky),
-            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
-            patch("gbserver.environment.skypilot_config.acquire_lease") as acq,
-        ):
-            k8s_env._get_launch_ready_event("lease-k")
-            await k8s_env.launch_skypilot(
-                launch_id="lease-k",
-                launcher_config={"run": "hostname", "resources": {"cloud": "k8s"}},
-                config={},
-            )
-        acq.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_lease_released_on_cleanup_before_early_return(self, slurm_env):
-        # No cluster recorded (cancel-before-launch): release must still fire,
-        # for every HPC cloud, ahead of the "no cluster to cleanup" early return.
-        with patch("gbserver.environment.skypilot_config.release_lease") as rel:
-            await slurm_env.cleanup_skypilot(launch_id="lease-2")
-        released = {c.args[1] for c in rel.call_args_list}
-        assert released == {"slurm", "lsf"}
-        assert all(c.args[2] == "lease-2" for c in rel.call_args_list)
-
-    def test_heartbeat_refreshes_every_hpc_cloud(self, slurm_env):
-        # The monitor cannot re-resolve the launch's cloud, so the heartbeat
-        # refreshes both HPC clouds keyed by launch_id (only the held one is a
-        # real bump; the other is a no-op in refresh_lease itself).
-        with patch("gbserver.environment.skypilot_config.refresh_lease") as ref:
-            slurm_env._refresh_lease_as_necessary("lease-3")
-        refreshed = {c.args[1] for c in ref.call_args_list}
-        assert refreshed == {"slurm", "lsf"}
-        assert all(c.args[2] == "lease-3" for c in ref.call_args_list)
-
-
 def _bind_unix_socket(directory, name):
     """Create a real AF_UNIX socket file ``name`` inside ``directory``.
 
@@ -1203,9 +1129,10 @@ def _bind_unix_socket(directory, name):
 
 
 class TestSshControlSocketClear:
-    """The ControlMaster socket clear runs on every HPC launch while the cloud
-    is idle, forcing the next SSH to re-authenticate against the fresh config;
-    it is skipped while a cluster is live (shared socket must not be disturbed)."""
+    """The ControlMaster socket clear runs on an HPC launch only when the
+    ``GBTEST_SKY_SSH_RESET`` env var is set (manually, during credential-change
+    testing), forcing the next SSH to re-authenticate against the fresh config.
+    Production leaves SkyPilot's socket management untouched."""
 
     def test_socket_dir_shape(self):
         # Real SDK path: the stable per-user *root* dir, NOT the hashed
@@ -1293,26 +1220,23 @@ class TestSshControlSocketClear:
         )
 
     @pytest.mark.asyncio
-    async def test_cleared_before_lease_acquire_when_idle(self, slurm_env):
-        # The clear is config-gated: enable reset_ssh_on_idle_launch so the idle
-        # launch clears the socket.
-        slurm_env.config.config["reset_ssh_on_idle_launch"] = True
+    async def test_cleared_on_launch_when_flag_set(self, slurm_env, monkeypatch):
+        # GBTEST_SKY_SSH_RESET=true: the HPC launch clears the socket (then
+        # materializes the SSH config) so the fresh credentials re-authenticate.
+        monkeypatch.setenv("GBTEST_SKY_SSH_RESET", "true")
         order = []
         mock_sky = _mock_sky()
         with (
             patch("gbserver.environment.skypilot.sky", mock_sky),
             patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
             patch(
-                "gbserver.environment.skypilot_config.live_cluster_count",
-                return_value=0,
-            ),
-            patch(
                 "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets",
                 side_effect=lambda: order.append("clear"),
             ) as clear,
-            patch(
-                "gbserver.environment.skypilot_config.acquire_lease",
-                side_effect=lambda *a, **k: order.append("acquire"),
+            patch.object(
+                slurm_env,
+                "_materialize_ssh_for_launch",
+                side_effect=lambda _c: order.append("materialize"),
             ),
         ):
             slurm_env._get_launch_ready_event("clear-1")
@@ -1322,83 +1246,21 @@ class TestSshControlSocketClear:
                 config={},
             )
         clear.assert_called_once()
-        assert order == ["clear", "acquire"]
+        assert order == ["clear", "materialize"]  # clear precedes materialize
 
     @pytest.mark.asyncio
-    async def test_not_cleared_when_cloud_busy(self, slurm_env):
-        # Config key enabled, but a cluster of this cloud is already live: the
-        # shared login-node socket is in use, so the *busy* gate must suppress the
-        # clear — while the lease is still acquired.
-        slurm_env.config.config["reset_ssh_on_idle_launch"] = True
+    async def test_not_cleared_when_flag_unset(self, slurm_env, monkeypatch):
+        # Without GBTEST_SKY_SSH_RESET (the production default) the clear never
+        # runs, even for an HPC launch; SkyPilot manages its own sockets.
+        monkeypatch.delenv("GBTEST_SKY_SSH_RESET", raising=False)
         mock_sky = _mock_sky()
         with (
             patch("gbserver.environment.skypilot.sky", mock_sky),
             patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
             patch(
-                "gbserver.environment.skypilot_config.live_cluster_count",
-                return_value=1,
-            ),
-            patch(
                 "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets"
             ) as clear,
-            patch("gbserver.environment.skypilot_config.acquire_lease") as acq,
-        ):
-            slurm_env._get_launch_ready_event("busy-1")
-            await slurm_env.launch_skypilot(
-                launch_id="busy-1",
-                launcher_config={"run": "hostname", "resources": {"cloud": "slurm"}},
-                config={},
-            )
-        clear.assert_not_called()
-        acq.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_not_cleared_when_other_hpc_cloud_busy(self, slurm_env):
-        # This cloud (slurm) is idle, but the OTHER HPC cloud (lsf) has a live
-        # cluster. The socket clear is user-wide (it removes every cloud's
-        # sockets), so it must be suppressed to avoid yanking the live lsf
-        # build's shared ControlMaster socket — while the slurm lease is still
-        # acquired.
-        slurm_env.config.config["reset_ssh_on_idle_launch"] = True
-        mock_sky = _mock_sky()
-        with (
-            patch("gbserver.environment.skypilot.sky", mock_sky),
-            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
-            patch(
-                "gbserver.environment.skypilot_config.live_cluster_count",
-                side_effect=lambda _home, cloud: 1 if cloud == "lsf" else 0,
-            ),
-            patch(
-                "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets"
-            ) as clear,
-            patch("gbserver.environment.skypilot_config.acquire_lease") as acq,
-        ):
-            slurm_env._get_launch_ready_event("other-busy-1")
-            await slurm_env.launch_skypilot(
-                launch_id="other-busy-1",
-                launcher_config={"run": "hostname", "resources": {"cloud": "slurm"}},
-                config={},
-            )
-        clear.assert_not_called()
-        acq.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_not_cleared_when_config_disabled(self, slurm_env):
-        # Without reset_ssh_on_idle_launch (the default) the clear never runs,
-        # even when the cloud is idle — but the lease is still acquired.
-        slurm_env.config.config.pop("reset_ssh_on_idle_launch", None)
-        mock_sky = _mock_sky()
-        with (
-            patch("gbserver.environment.skypilot.sky", mock_sky),
-            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
-            patch(
-                "gbserver.environment.skypilot_config.live_cluster_count",
-                return_value=0,
-            ),
-            patch(
-                "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets"
-            ) as clear,
-            patch("gbserver.environment.skypilot_config.acquire_lease") as acq,
+            patch.object(slurm_env, "_materialize_ssh_for_launch") as mat,
         ):
             slurm_env._get_launch_ready_event("noflag-1")
             await slurm_env.launch_skypilot(
@@ -1407,7 +1269,21 @@ class TestSshControlSocketClear:
                 config={},
             )
         clear.assert_not_called()
-        acq.assert_called_once()
+        mat.assert_called_once()  # SSH config is still materialized
+
+    def test_not_cleared_for_non_hpc_cloud(self, slurm_env, monkeypatch):
+        # Even with the flag set, a non-HPC cloud (no shared SSH config file) is
+        # a no-op: neither the clear nor the SSH materialization runs.
+        monkeypatch.setenv("GBTEST_SKY_SSH_RESET", "true")
+        with (
+            patch(
+                "gbserver.environment.skypilot._clear_skypilot_ssh_control_sockets"
+            ) as clear,
+            patch.object(slurm_env, "_materialize_ssh_for_launch") as mat,
+        ):
+            slurm_env._prepare_ssh_for_launch("k8s")
+        clear.assert_not_called()
+        mat.assert_not_called()
 
 
 def _raise_from_module(filename: str) -> None:

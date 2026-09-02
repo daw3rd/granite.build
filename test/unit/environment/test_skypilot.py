@@ -1679,30 +1679,29 @@ class TestInlineConfigMaterialization:
             m.assert_called_once()
             args = m.call_args.args
             assert args[0] == "env-inline"  # env name
-            # SSH is NOT materialized here (merged per-launch under the lease);
-            # only cloud_config and aws are forwarded.
+            # SSH is NOT materialized here (merged per-launch); only cloud_config
+            # and aws are forwarded.
             assert args[1] is None and args[2] == {"lsf": {"q": 1}} and args[3]
 
-    def test_ssh_materialized_per_launch_under_lease(self):
+    def test_ssh_materialized_per_launch(self):
         env = self._env(
             {"cluster_ssh_configs": {"slurm": [{"Host": "c", "HostName": "h"}]}}
         )
         with patch(
             "gbserver.environment.skypilot_config.materialize_ssh_for_cloud"
         ) as m:
-            env._materialize_ssh_for_launch("slurm", "L1")
+            env._materialize_ssh_for_launch("slurm")
             m.assert_called_once()
-            args, kwargs = m.call_args.args, m.call_args.kwargs
+            args = m.call_args.args
             assert args[0] == "env-inline"  # env name
             assert args[3] == "slurm"  # only the launched cloud is merged
-            assert kwargs["launch_id"] == "L1"  # excluded from the replace check
 
     def test_ssh_materialize_noop_without_inline_ssh(self):
         env = self._env({"default_cloud": "slurm"})
         with patch(
             "gbserver.environment.skypilot_config.materialize_ssh_for_cloud"
         ) as m:
-            env._materialize_ssh_for_launch("slurm", "L1")
+            env._materialize_ssh_for_launch("slurm")
             m.assert_not_called()
 
     @pytest.mark.asyncio

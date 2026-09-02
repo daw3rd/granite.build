@@ -21,10 +21,7 @@ never touched, and no ``sky`` SDK import is required.
 """
 
 import configparser
-import json
-import os
 import threading
-import time
 
 import pytest
 import yaml
@@ -130,30 +127,11 @@ class TestSshMerge:
         text = _read(tmp_path / ".slurm" / "config")
         assert "Host clusterA" in text and "Host clusterB" in text
 
-    def test_collision_same_alias_different_body_when_live(self, tmp_path):
-        # A differing managed block for the same alias is refused only while a
-        # cluster of that cloud is live (a lease holder is present).
-        sc.merge_ssh_blocks(
-            "slurm",
-            sc.render_ssh_hosts([_host("clusterA", HostName="a")], {}),
-            "envA",
-            home=tmp_path,
-        )
-        sc.acquire_lease(tmp_path, "slurm", "L1")  # a live cluster depends on it
-        with pytest.raises(SkypilotConfigCollisionError) as exc:
-            sc.merge_ssh_blocks(
-                "slurm",
-                sc.render_ssh_hosts([_host("clusterA", HostName="DIFFERENT")], {}),
-                "envB",
-                home=tmp_path,
-            )
-        msg = str(exc.value)
-        assert "clusterA" in msg and "envB" in msg and "envA" in msg
-
-    def test_replace_when_idle(self, tmp_path):
-        # With no live cluster (no lease holder), a differing managed block for
-        # the same alias is replaced rather than refused (self-heals a stale or
-        # re-keyed entry left by an earlier run).
+    def test_differing_managed_block_is_overwritten(self, tmp_path):
+        # A differing gbserver-managed block for the same alias is overwritten
+        # (last-writer-wins), self-healing a stale or re-keyed entry left by an
+        # earlier run. No lease, no refusal — foreign entries are the only ones
+        # gbserver refuses to clobber (covered separately below).
         sc.merge_ssh_blocks(
             "slurm",
             sc.render_ssh_hosts([_host("clusterA", HostName="a")], {}),
@@ -168,64 +146,6 @@ class TestSshMerge:
         )
         text = _read(tmp_path / ".slurm" / "config")
         assert "HostName NEW" in text and "HostName a" not in text
-
-    def test_replace_refused_again_after_release(self, tmp_path):
-        # Sanity: once the live cluster releases, replacement is allowed again.
-        sc.merge_ssh_blocks(
-            "slurm",
-            sc.render_ssh_hosts([_host("clusterA", HostName="a")], {}),
-            "envA",
-            home=tmp_path,
-        )
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        sc.release_lease(tmp_path, "slurm", "L1")
-        sc.merge_ssh_blocks(
-            "slurm",
-            sc.render_ssh_hosts([_host("clusterA", HostName="NEW")], {}),
-            "envB",
-            home=tmp_path,
-        )
-        assert "HostName NEW" in _read(tmp_path / ".slurm" / "config")
-
-    def test_launch_replaces_over_its_own_lease(self, tmp_path):
-        # A launch acquires its lease BEFORE merging (closing the check-then-write
-        # race), then re-materializes a DIFFERING block for the same alias. Its own
-        # holder must be excluded from the replace check so re-keying over its own
-        # stale entry still works — only OTHER live holders block a replace.
-        sc.merge_ssh_blocks(
-            "slurm",
-            sc.render_ssh_hosts([_host("clusterA", HostName="a")], {}),
-            "envA",
-            home=tmp_path,
-        )
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        sc.merge_ssh_blocks(
-            "slurm",
-            sc.render_ssh_hosts([_host("clusterA", HostName="NEW")], {}),
-            "envA",
-            home=tmp_path,
-            launch_id="L1",  # this launch's own holder is excluded
-        )
-        assert "HostName NEW" in _read(tmp_path / ".slurm" / "config")
-
-    def test_other_live_launch_still_blocks_replace(self, tmp_path):
-        # With another launch's lease live, a differing block is still refused even
-        # when the merging launch passes its own (different) launch_id.
-        sc.merge_ssh_blocks(
-            "slurm",
-            sc.render_ssh_hosts([_host("clusterA", HostName="a")], {}),
-            "envA",
-            home=tmp_path,
-        )
-        sc.acquire_lease(tmp_path, "slurm", "L1")  # another live cluster
-        with pytest.raises(SkypilotConfigCollisionError):
-            sc.merge_ssh_blocks(
-                "slurm",
-                sc.render_ssh_hosts([_host("clusterA", HostName="DIFFERENT")], {}),
-                "envB",
-                home=tmp_path,
-                launch_id="L2",  # excluding self leaves L1 -> replace refused
-            )
 
     def test_foreign_content_preserved_and_differing_alias_conflicts(self, tmp_path):
         dest = tmp_path / ".slurm" / "config"
@@ -276,113 +196,6 @@ class TestSshMerge:
         text = _read(dest)
         assert sc.MANAGED_BEGIN not in text  # no managed block added
         assert text == original  # foreign file left byte-for-byte unchanged
-
-
-# --------------------------------------------------------------------------- #
-# Per-cloud live-cluster lease (drives replace-when-idle / refuse-when-busy)
-# --------------------------------------------------------------------------- #
-class TestLeaseStore:
-    def test_acquire_then_count(self, tmp_path):
-        assert sc.live_cluster_count(tmp_path, "slurm") == 0
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        assert sc.live_cluster_count(tmp_path, "slurm") == 1
-
-    def test_release_decrements(self, tmp_path):
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        sc.acquire_lease(tmp_path, "slurm", "L2")
-        assert sc.live_cluster_count(tmp_path, "slurm") == 2
-        sc.release_lease(tmp_path, "slurm", "L1")
-        assert sc.live_cluster_count(tmp_path, "slurm") == 1
-
-    def test_acquire_is_idempotent_per_launch_id(self, tmp_path):
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        sc.acquire_lease(tmp_path, "slurm", "L1")  # refresh, not a second holder
-        assert sc.live_cluster_count(tmp_path, "slurm") == 1
-
-    def test_release_absent_is_noop(self, tmp_path):
-        sc.release_lease(tmp_path, "slurm", "nope")  # no store file yet
-        assert sc.live_cluster_count(tmp_path, "slurm") == 0
-
-    def test_clouds_are_independent(self, tmp_path):
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        assert sc.live_cluster_count(tmp_path, "lsf") == 0
-        assert sc.live_cluster_count(tmp_path, "slurm") == 1
-
-    def test_dead_pid_pruned(self, tmp_path, monkeypatch):
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        monkeypatch.setattr(sc, "_pid_alive", lambda pid: False)
-        assert sc.live_cluster_count(tmp_path, "slurm") == 0
-
-    def test_ttl_expired_pruned(self, tmp_path):
-        path = sc._lease_path(tmp_path, "slurm")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        stale_ts = time.time() - sc.LEASE_TTL_SECONDS - 1
-        path.write_text(
-            json.dumps({"L1": {"pid": os.getpid(), "ts": stale_ts}}),
-            encoding="utf-8",
-        )
-        assert sc.live_cluster_count(tmp_path, "slurm") == 0
-
-    def test_corrupt_store_treated_as_empty(self, tmp_path):
-        path = sc._lease_path(tmp_path, "slurm")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{not json", encoding="utf-8")
-        assert sc.live_cluster_count(tmp_path, "slurm") == 0
-        sc.acquire_lease(tmp_path, "slurm", "L1")  # recovers
-        assert sc.live_cluster_count(tmp_path, "slurm") == 1
-
-    def test_non_numeric_ts_pruned_not_raised(self, tmp_path):
-        # A partially-written/tampered holder can carry a non-numeric ts; it must
-        # be dropped (not raise TypeError) so acquire/release/count still work.
-        path = sc._lease_path(tmp_path, "slurm")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "bad": {"pid": os.getpid(), "ts": "not-a-number"},
-                    "good": {"pid": os.getpid(), "ts": time.time()},
-                }
-            ),
-            encoding="utf-8",
-        )
-        # The corrupt "bad" holder is skipped; the valid "good" one survives.
-        assert sc.live_cluster_count(tmp_path, "slurm") == 1
-        sc.acquire_lease(tmp_path, "slurm", "L1")  # still functional
-        assert sc.live_cluster_count(tmp_path, "slurm") == 2
-
-    def test_refresh_bumps_existing_ts(self, tmp_path):
-        # Heartbeat on a live holder aged to just within the TTL moves its ts
-        # forward, keeping it from being pruned as stale.
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        path = sc._lease_path(tmp_path, "slurm")
-        aged = time.time() - sc.LEASE_TTL_SECONDS + 60
-        holders = json.loads(path.read_text(encoding="utf-8"))
-        holders["L1"]["ts"] = aged
-        path.write_text(json.dumps(holders), encoding="utf-8")
-        sc.refresh_lease(tmp_path, "slurm", "L1")
-        bumped = json.loads(path.read_text(encoding="utf-8"))["L1"]["ts"]
-        assert bumped > aged
-        assert sc.live_cluster_count(tmp_path, "slurm") == 1
-
-    def test_refresh_absent_is_noop(self, tmp_path):
-        sc.refresh_lease(tmp_path, "slurm", "nope")  # no store file yet
-        assert sc.live_cluster_count(tmp_path, "slurm") == 0
-        sc.acquire_lease(tmp_path, "slurm", "L1")
-        sc.refresh_lease(tmp_path, "slurm", "other")  # id that never held a lease
-        assert sc.live_cluster_count(tmp_path, "slurm") == 1
-
-    def test_refresh_does_not_resurrect_expired(self, tmp_path):
-        # A TTL-expired holder is pruned on read; a heartbeat must not bring it
-        # back (the build already ended without releasing).
-        path = sc._lease_path(tmp_path, "slurm")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        stale_ts = time.time() - sc.LEASE_TTL_SECONDS - 1
-        path.write_text(
-            json.dumps({"L1": {"pid": os.getpid(), "ts": stale_ts}}),
-            encoding="utf-8",
-        )
-        sc.refresh_lease(tmp_path, "slurm", "L1")
-        assert sc.live_cluster_count(tmp_path, "slurm") == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -527,25 +340,10 @@ class TestIdentityKey:
         )
         assert _read(dest) == first  # stable content-addressed path, no churn
 
-    def test_same_alias_different_key_collides_when_live(self, tmp_path):
-        # While a cluster of that cloud is live, a re-keyed same-alias entry is
-        # still refused — SkyPilot may re-read the old key for its lifetime.
-        self._materialize(
-            tmp_path, {"BV_KEY": self._PEM}, HostName="h", IdentityKey="BV_KEY"
-        )
-        sc.acquire_lease(tmp_path, "lsf", "L1")  # a live cluster depends on it
-        with pytest.raises(SkypilotConfigCollisionError):
-            self._materialize(
-                tmp_path,
-                {"BV_KEY": "-----DIFFERENT KEY-----"},
-                HostName="h",
-                IdentityKey="BV_KEY",
-            )
-
-    def test_same_alias_different_key_replaces_when_idle(self, tmp_path):
-        # No live cluster: re-keying the same alias self-heals (replaces the
-        # stale managed block) instead of colliding. This is the stale-config
-        # bug fix — previously this raised and required a manual file delete.
+    def test_same_alias_different_key_replaces(self, tmp_path):
+        # Re-keying the same alias self-heals (replaces the stale managed block)
+        # instead of colliding. This is the stale-config bug fix — previously this
+        # raised and required a manual file delete.
         self._materialize(
             tmp_path, {"BV_KEY": self._PEM}, HostName="h", IdentityKey="BV_KEY"
         )
