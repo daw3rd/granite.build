@@ -1169,6 +1169,16 @@ class TestSlurmLease:
         assert released == {"slurm", "lsf"}
         assert all(c.args[2] == "lease-2" for c in rel.call_args_list)
 
+    def test_heartbeat_refreshes_every_hpc_cloud(self, slurm_env):
+        # The monitor cannot re-resolve the launch's cloud, so the heartbeat
+        # refreshes both HPC clouds keyed by launch_id (only the held one is a
+        # real bump; the other is a no-op in refresh_lease itself).
+        with patch("gbserver.environment.skypilot_config.refresh_lease") as ref:
+            slurm_env._refresh_lease_as_necessary("lease-3")
+        refreshed = {c.args[1] for c in ref.call_args_list}
+        assert refreshed == {"slurm", "lsf"}
+        assert all(c.args[2] == "lease-3" for c in ref.call_args_list)
+
 
 def _bind_unix_socket(directory, name):
     """Create a real AF_UNIX socket file ``name`` inside ``directory``.

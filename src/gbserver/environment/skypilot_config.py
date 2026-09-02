@@ -28,12 +28,14 @@ for a cluster's whole lifetime, so a differing managed block for the same alias
 may only be rewritten when nothing depends on the old content. A per-cloud
 **usage lease** (``~/.sky/gbserver-leases/<cloud>.json``) tracks that: each live
 cluster registers a holder keyed by ``launch_id`` (``acquire_lease`` before
-provisioning, ``release_lease`` at teardown). The merge then applies
-replace-when-idle / refuse-when-busy: same content is a no-op; differing content
-with **no** live holder replaces the stale block (self-heals a re-keyed entry);
-differing content **with** a live holder is refused. Holders whose PID is dead or
-older than ``LEASE_TTL_SECONDS`` are pruned so a crashed build cannot wedge the
-cloud. Single-host by design (the config files are host-local).
+provisioning, ``release_lease`` at teardown, ``refresh_lease`` as a heartbeat
+while it runs). The merge then applies replace-when-idle / refuse-when-busy: same
+content is a no-op; differing content with **no** live holder replaces the stale
+block (self-heals a re-keyed entry); differing content **with** a live holder is
+refused. Holders whose PID is dead or whose last heartbeat is older than
+``LEASE_TTL_SECONDS`` are pruned, so a build that ends without releasing (or a
+crashed process) cannot wedge the cloud for longer than one TTL. Single-host by
+design (the config files are host-local).
   * ``cloud_config`` -> ``~/.sky/config.yaml`` (deep-merged into the global
     SkyPilot config the API server / optimizer reads directly; the env's values
     win, unrelated keys are preserved).
@@ -82,10 +84,15 @@ _OWNER_PREFIX = "# gbserver-owner="
 # threads).
 _THREAD_LOCK = threading.RLock()
 
-# A leftover lease holder older than this (seconds) is treated as stale and
-# pruned, even if its PID appears alive — guards against PID reuse after a crash.
-# Set well above any realistic single build's cluster lifetime.
-LEASE_TTL_SECONDS = 6 * 3600
+# A lease holder whose last heartbeat (``ts``) is older than this (seconds) is
+# treated as stale and pruned, even if its PID appears alive — this is what
+# reclaims a same-process leak (a build that ended without ``release_lease``),
+# since the server PID stays alive for every lease. A live cluster keeps its
+# lease fresh via ``refresh_lease`` on each monitor poll (≤ the poll interval,
+# 300s by default), so the TTL need only exceed the LONGEST gap between
+# heartbeats — the pre-monitor provisioning/queue window and the retry-relaunch
+# wait (``RETRY_RELAUNCH_TIMEOUT_SECONDS`` = 30 min) — NOT the whole build.
+LEASE_TTL_SECONDS = 60 * 60
 
 
 # --------------------------------------------------------------------------- #
@@ -536,6 +543,28 @@ def release_lease(home_path: Path, cloud: str, launch_id: str) -> None:
         holders = _read_live_holders(home_path, cloud)
         if holders.pop(launch_id, None) is None:
             return
+        _write_atomic(_lease_path(home_path, cloud), json.dumps(holders))
+
+
+def refresh_lease(home_path: Path, cloud: str, launch_id: str) -> None:
+    """Heartbeat: bump the timestamp of an EXISTING holder for ``launch_id``.
+
+    Called periodically while a cluster is live (e.g. each monitor poll) so its
+    lease does not age past ``LEASE_TTL_SECONDS`` and get pruned as stale. Unlike
+    ``acquire_lease`` this never creates a holder — it only extends one already
+    registered — so a released or already-expired lease is never resurrected.
+
+    :param home_path: Home directory the store lives under.
+    :param cloud: Cloud name (``slurm``/``lsf``).
+    :param launch_id: The launch whose holder to refresh; no-op if not present
+        (released, expired, or a cloud this launch never held).
+    """
+    with _THREAD_LOCK, _lock_for(home_path, f"gbserver-{cloud}.lock"):
+        holders = _read_live_holders(home_path, cloud)
+        holder = holders.get(launch_id)
+        if holder is None:
+            return
+        holder["ts"] = time.time()
         _write_atomic(_lease_path(home_path, cloud), json.dumps(holders))
 
 

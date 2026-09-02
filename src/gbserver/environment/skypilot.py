@@ -1105,6 +1105,22 @@ class Skypilot(Environment):
         for hpc_cloud in _SSH_HPC_CLOUDS:
             release_lease(Path.home(), hpc_cloud, launch_id)
 
+    def _refresh_lease_as_necessary(self: Self, launch_id: str) -> None:
+        """Refresh this launch's per-cloud usage lease so it is not pruned.
+
+        Called on each monitor poll while the cluster is live. Refreshes every
+        HPC cloud (only the one this launch actually holds is bumped; the rest
+        are no-ops), mirroring ``_release_socket_lease_as_necessary`` so the
+        monitor need not thread the resolved cloud through. Never creates a
+        lease — a launch that holds none (k8s/aws) is a no-op.
+
+        :param launch_id: The launch whose lease to heartbeat.
+        """
+        from gbserver.environment.skypilot_config import refresh_lease
+
+        for hpc_cloud in _SSH_HPC_CLOUDS:
+            refresh_lease(Path.home(), hpc_cloud, launch_id)
+
     def _get_cloud(self: Self) -> str:
         """Get default cloud/infra from environment.yaml config."""
         if self.config is None:
@@ -2146,6 +2162,9 @@ class Skypilot(Environment):
         self._log_lines_parsed.setdefault(launch_id, 0)
 
         while not stop_event.is_set():
+            # Refresh the per-cloud usage lease each poll so a live cluster's
+            # lease stays fresh (pruned only after LEASE_TTL_SECONDS of silence).
+            self._refresh_lease_as_necessary(launch_id)
             status = None
             poll_failed = False
             try:

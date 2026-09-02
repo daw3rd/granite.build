@@ -331,6 +331,40 @@ class TestLeaseStore:
         sc.acquire_lease(tmp_path, "slurm", "L1")  # recovers
         assert sc.live_cluster_count(tmp_path, "slurm") == 1
 
+    def test_refresh_bumps_existing_ts(self, tmp_path):
+        # Heartbeat on a live holder aged to just within the TTL moves its ts
+        # forward, keeping it from being pruned as stale.
+        sc.acquire_lease(tmp_path, "slurm", "L1")
+        path = sc._lease_path(tmp_path, "slurm")
+        aged = time.time() - sc.LEASE_TTL_SECONDS + 60
+        holders = json.loads(path.read_text(encoding="utf-8"))
+        holders["L1"]["ts"] = aged
+        path.write_text(json.dumps(holders), encoding="utf-8")
+        sc.refresh_lease(tmp_path, "slurm", "L1")
+        bumped = json.loads(path.read_text(encoding="utf-8"))["L1"]["ts"]
+        assert bumped > aged
+        assert sc.live_cluster_count(tmp_path, "slurm") == 1
+
+    def test_refresh_absent_is_noop(self, tmp_path):
+        sc.refresh_lease(tmp_path, "slurm", "nope")  # no store file yet
+        assert sc.live_cluster_count(tmp_path, "slurm") == 0
+        sc.acquire_lease(tmp_path, "slurm", "L1")
+        sc.refresh_lease(tmp_path, "slurm", "other")  # id that never held a lease
+        assert sc.live_cluster_count(tmp_path, "slurm") == 1
+
+    def test_refresh_does_not_resurrect_expired(self, tmp_path):
+        # A TTL-expired holder is pruned on read; a heartbeat must not bring it
+        # back (the build already ended without releasing).
+        path = sc._lease_path(tmp_path, "slurm")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stale_ts = time.time() - sc.LEASE_TTL_SECONDS - 1
+        path.write_text(
+            json.dumps({"L1": {"pid": os.getpid(), "ts": stale_ts}}),
+            encoding="utf-8",
+        )
+        sc.refresh_lease(tmp_path, "slurm", "L1")
+        assert sc.live_cluster_count(tmp_path, "slurm") == 0
+
 
 # --------------------------------------------------------------------------- #
 # cloud_config -> ~/.sky/config.yaml (written from the env, env wins)
