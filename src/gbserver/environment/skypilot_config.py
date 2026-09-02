@@ -505,6 +505,14 @@ def _read_live_holders(home_path: Path, cloud: str) -> Dict[str, dict]:
             continue
         ts = holder.get("ts", 0)
         pid = holder.get("pid")
+        # A partially-written or tampered holder can carry a non-numeric ts;
+        # ``now - ts`` would raise TypeError and escape the corrupt-store
+        # recovery above, so drop such a holder as untrusted/stale. (``bool`` is
+        # an ``int`` subclass and supports the subtraction, so it needs no guard;
+        # a stray ``True``/``False`` prunes as stale below.) ``pid`` needs no
+        # guard — ``_pid_alive`` already treats a non-int pid as dead.
+        if not isinstance(ts, (int, float)):
+            continue
         if now - ts > LEASE_TTL_SECONDS:
             continue
         if not _pid_alive(pid):

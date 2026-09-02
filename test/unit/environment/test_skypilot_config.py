@@ -331,6 +331,25 @@ class TestLeaseStore:
         sc.acquire_lease(tmp_path, "slurm", "L1")  # recovers
         assert sc.live_cluster_count(tmp_path, "slurm") == 1
 
+    def test_non_numeric_ts_pruned_not_raised(self, tmp_path):
+        # A partially-written/tampered holder can carry a non-numeric ts; it must
+        # be dropped (not raise TypeError) so acquire/release/count still work.
+        path = sc._lease_path(tmp_path, "slurm")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "bad": {"pid": os.getpid(), "ts": "not-a-number"},
+                    "good": {"pid": os.getpid(), "ts": time.time()},
+                }
+            ),
+            encoding="utf-8",
+        )
+        # The corrupt "bad" holder is skipped; the valid "good" one survives.
+        assert sc.live_cluster_count(tmp_path, "slurm") == 1
+        sc.acquire_lease(tmp_path, "slurm", "L1")  # still functional
+        assert sc.live_cluster_count(tmp_path, "slurm") == 2
+
     def test_refresh_bumps_existing_ts(self, tmp_path):
         # Heartbeat on a live holder aged to just within the TTL moves its ts
         # forward, keeping it from being pruned as stale.
