@@ -1383,3 +1383,43 @@ class TestInteractiveAuthErrorTranslation:
         readable = unwrap_errors(err)
         assert "SSH authentication" in readable
         assert "fileno" not in readable
+
+    def test_sky_interactive_auth_module_still_present(self):
+        """Guard against SkyPilot relocating the interactive-auth module.
+
+        The other tests in this class raise from a *synthetic* path built to
+        match ``_SKY_INTERACTIVE_AUTH_MODULE``, so they exercise the matching
+        logic but cannot catch a SkyPilot upgrade that moves the module out
+        from under the constant. When that happens ``_is_interactive_auth_stdin_failure``
+        silently stops firing and users see the opaque ``io.UnsupportedOperation``
+        stdin crash again. This canary pins the constant to the *installed*
+        SkyPilot so such a relocation fails loudly here instead. It checks both
+        that the module still exists and that it still contains the
+        ``stdin``/``fileno`` call that raises in a headless context — catching a
+        refactor that keeps the file but moves the crash elsewhere.
+
+        Skips when SkyPilot is not installed (mock-tier venv).
+        """
+        from pathlib import Path
+
+        sky = pytest.importorskip("sky")
+
+        from gbserver.environment.skypilot import _SKY_INTERACTIVE_AUTH_MODULE
+
+        # The constant is a "sky/<...>" path fragment; resolve it against the
+        # installed package root (drop the leading "sky/" so it is not doubled).
+        rel = _SKY_INTERACTIVE_AUTH_MODULE.split("sky/", 1)[1]
+        module_file = Path(sky.__file__).parent / rel
+        assert module_file.is_file(), (
+            f"SkyPilot no longer ships {_SKY_INTERACTIVE_AUTH_MODULE} "
+            f"(looked for {module_file}); interactive-auth error relabeling in "
+            "_is_interactive_auth_stdin_failure has silently stopped firing. "
+            "Update _SKY_INTERACTIVE_AUTH_MODULE to the module's new location."
+        )
+        source = module_file.read_text(encoding="utf-8")
+        assert "fileno" in source and "stdin" in source, (
+            f"{_SKY_INTERACTIVE_AUTH_MODULE} no longer references the "
+            "stdin/fileno call that raises io.UnsupportedOperation in a headless "
+            "context; the interactive-auth crash may now originate elsewhere. "
+            "Re-verify the detection frame in _is_interactive_auth_stdin_failure."
+        )
