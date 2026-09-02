@@ -388,12 +388,23 @@ def _ssh_control_socket_dir() -> Optional[str]:
     token (a hash of localhost/remote-host/port/user, not the key), which is why
     a leftover socket lets a re-keyed launch skip authentication.
 
+    The ``/tmp`` prefix is deliberate, not a ``TMPDIR`` oversight: SkyPilot's
+    ``_ssh_control_path`` hardcodes ``/tmp/skypilot_ssh_<user_hash>`` and does
+    *not* honor ``TMPDIR`` (see ``sky.utils.command_runner``), so we mirror that
+    literal exactly to stay in sync — deriving our own base from ``TMPDIR`` would
+    diverge from where SkyPilot actually places the sockets. If a future SkyPilot
+    release relocates the socket root (e.g. starts honoring ``TMPDIR``), this dir
+    stops matching and the caller's glob finds nothing; the caller surfaces that
+    zero-clear in a log rather than passing silently (see
+    ``_clear_skypilot_ssh_control_sockets``).
+
     :returns: absolute path to the control-socket root directory, or ``None`` if
         the SkyPilot SDK cannot be imported (gbserver may run without it).
     """
     try:
         from sky.utils import common_utils
 
+        # Mirror SkyPilot's own hardcoded /tmp base (command_runner._ssh_control_path).
         return f"/tmp/skypilot_ssh_{common_utils.get_user_hash()}"
     except Exception:  # SDK missing or upstream API drift; caller treats as no-op.
         return None
@@ -427,7 +438,10 @@ def _clear_skypilot_ssh_control_sockets() -> None:
     ``GBTEST_SKY_SSH_RESET`` env var — see ``is_sky_ssh_reset_enabled``), where
     the socket root is expected to resolve; if it cannot (SkyPilot SDK missing or
     its socket-path API drifted) we log a warning rather than silently skipping,
-    since a re-keyed config would then reuse a stale connection.
+    since a re-keyed config would then reuse a stale connection. A resolved root
+    that yields zero sockets is also logged (at info) rather than passing
+    silently, so a socket-layout mismatch (e.g. SkyPilot relocating the root) is
+    diagnosable instead of masquerading as a successful no-op reset.
 
     :returns: ``None``.
     """
@@ -452,6 +466,18 @@ def _clear_skypilot_ssh_control_sockets() -> None:
         logger.info(
             "Cleared %d stale SkyPilot SSH control socket(s) under %s.",
             removed,
+            control_root,
+        )
+    else:
+        # A deliberate reset (GBTEST_SKY_SSH_RESET) that clears nothing is worth
+        # surfacing: either no socket was cached yet (benign — e.g. first launch)
+        # or the root no longer matches SkyPilot's actual socket layout (drift, or
+        # SkyPilot honoring TMPDIR), in which case a re-keyed config would silently
+        # reuse a stale connection. Logging it turns that mismatch from invisible
+        # into diagnosable.
+        logger.info(
+            "SkyPilot SSH control-socket reset found no sockets under %s "
+            "(none cached yet, or SkyPilot's socket layout has moved).",
             control_root,
         )
 
