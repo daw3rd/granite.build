@@ -1277,7 +1277,9 @@ class TestSshControlSocketClear:
             for r in caplog.records
         )
 
-    def test_logs_when_root_resolves_but_no_sockets(self, tmp_path, monkeypatch, caplog):
+    def test_logs_when_root_resolves_but_no_sockets(
+        self, tmp_path, monkeypatch, caplog
+    ):
         # A resolved-but-empty root (nothing cached yet, or SkyPilot relocated its
         # socket layout) must not pass silently: the zero-clear is logged so a
         # dir mismatch under GBTEST_SKY_SSH_RESET is diagnosable, not invisible.
@@ -1288,9 +1290,7 @@ class TestSshControlSocketClear:
         monkeypatch.setattr(skypilot, "_ssh_control_socket_dir", lambda: str(tmp_path))
         with caplog.at_level(logging.INFO):
             skypilot._clear_skypilot_ssh_control_sockets()  # empty root, no raise
-        assert any(
-            "found no sockets under" in r.message for r in caplog.records
-        )
+        assert any("found no sockets under" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_cleared_on_launch_when_flag_set(self, slurm_env, monkeypatch):
