@@ -1072,13 +1072,22 @@ class Skypilot(Environment):
         :param cloud: resolved target cloud (e.g. ``"slurm"``, ``"lsf"``).
         :param override_res: merged step/build launcher ``resources`` dict.
         :param config: the step/build ``config`` dict.
-        :returns: an ``(infra, zone)`` tuple; ``zone`` is ``None`` whenever it
-            was folded into the infra string (sky.Resources rejects specifying
-            both ``infra`` with a zone segment and a separate ``zone``).
+        :returns: an ``(infra, zone)`` tuple. For the cluster/zone-composition
+            paths ``zone`` is ``None`` because it was folded into the infra
+            string. For an explicit ``infra`` override any separate ``zone`` is
+            passed through unchanged (see below). ``sky.Resources`` rejects
+            specifying both an ``infra`` that already carries a zone segment and
+            a separate ``zone``.
         """
-        # An explicit full infra string wins outright.
+        # An explicit infra string wins outright. A separate ``zone`` (e.g. a
+        # SLURM partition alongside a ``cloud/cluster`` infra) is still passed
+        # through to sky.Resources — folding or dropping it would silently
+        # discard the partition. The caller must not combine a 3-segment infra
+        # (cloud/cluster/zone) with a separate ``zone``; sky.Resources rejects
+        # that. No config/env zone-fallback here: an explicit infra opts out of
+        # the SLURM fallback below, matching the pre-refactor behavior.
         if override_res.get("infra"):
-            return override_res["infra"], None
+            return override_res["infra"], override_res.get("zone")
 
         cluster = override_res.get("cluster")
         zone = override_res.get("zone")

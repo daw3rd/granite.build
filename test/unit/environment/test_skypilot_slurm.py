@@ -149,6 +149,34 @@ class TestSlurmInfraPath:
 
         call_kwargs = mock_sky.Resources.call_args[1]
         assert call_kwargs["infra"] == "slurm/my-cluster/gpu-partition"
+        assert call_kwargs["zone"] is None  # partition already in the infra
+
+    @pytest.mark.asyncio
+    async def test_explicit_infra_passes_separate_zone_through(self, slurm_env):
+        # Regression: a 2-segment infra (cloud/cluster, no partition) plus a
+        # separate `zone` must keep the zone — it is passed through to
+        # sky.Resources as the standalone `zone` arg, not silently dropped.
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+        ):
+            slurm_env._get_launch_ready_event("slurm-4b")
+            await slurm_env.launch_skypilot(
+                launch_id="slurm-4b",
+                launcher_config={
+                    "run": "hostname",
+                    "resources": {
+                        "infra": "slurm/my-cluster",
+                        "zone": "gpu-partition",
+                    },
+                },
+                config={},
+            )
+
+        call_kwargs = mock_sky.Resources.call_args[1]
+        assert call_kwargs["infra"] == "slurm/my-cluster"
+        assert call_kwargs["zone"] == "gpu-partition"
 
     @pytest.mark.asyncio
     async def test_defaults_to_env_config_cloud(self, slurm_env):
