@@ -297,11 +297,27 @@ class TestSlurmEnvConfigPartition:
         assert kw["zone"] is None
 
     @pytest.mark.asyncio
-    async def test_non_slurm_ignores_env_config_zone(self):
-        """A non-slurm cloud must NOT pull cluster/zone from env config — only
-        the resources override is consulted (behavior unchanged for lsf/k8s)."""
+    async def test_lsf_env_config_composes_into_infra(self):
+        """LSF is an HPC cloud, so cluster/queue (`zone`) fall back through env
+        config the same way SLURM does — the queue can be set at env level."""
         env = _make_env(
             {"default_cloud": "lsf", "cluster": "bluevela", "zone": "normal"}
+        )
+        kw = await _launch_and_get_resources(
+            env,
+            "envcfg-lsf",
+            launcher_config={"run": "hostname", "resources": {}},
+            config={},
+        )
+        assert kw["infra"] == "lsf/bluevela/normal"
+        assert kw["zone"] is None
+
+    @pytest.mark.asyncio
+    async def test_non_hpc_ignores_env_config_zone(self):
+        """A non-HPC cloud must NOT pull cluster/zone from env config — only the
+        resources override is consulted (behavior unchanged for k8s/aws)."""
+        env = _make_env(
+            {"default_cloud": "k8s", "cluster": "bluevela", "zone": "normal"}
         )
         kw = await _launch_and_get_resources(
             env,
@@ -309,8 +325,22 @@ class TestSlurmEnvConfigPartition:
             launcher_config={"run": "hostname", "resources": {}},
             config={},
         )
-        assert kw["infra"] == "lsf"
+        assert kw["infra"] == "k8s"
         assert kw["zone"] is None
+
+    @pytest.mark.asyncio
+    async def test_hpc_zone_without_cluster_raises(self):
+        """An HPC zone/partition with no cluster is inexpressible in SkyPilot's
+        cloud/region/zone grammar, so it must fail loud rather than silently
+        mislabel the partition as the cluster (`slurm/<zone>`)."""
+        env = _make_env({"default_cloud": "slurm", "zone": "gpu-mid"})
+        with pytest.raises(ValueError, match="requires a cluster"):
+            await _launch_and_get_resources(
+                env,
+                "envcfg-noclust",
+                launcher_config={"run": "hostname", "resources": {}},
+                config={},
+            )
 
 
 class TestSharedWorkdirEnvVar:

@@ -1086,14 +1086,15 @@ class Skypilot(Environment):
     ) -> tuple[str, str | None]:
         """Resolve the SkyPilot ``infra`` string and standalone ``zone`` arg.
 
-        Supports the ``cloud/cluster/partition`` infra format. For the
-        ``slurm`` cloud, ``cluster``/``zone`` (the SLURM partition) fall back
-        through the step/build ``config`` and then the environment.yaml
-        ``config`` when not set on the resources override, so the partition can
-        be set at any of those layers (precedence: resources override > step or
-        build ``config`` > environment.yaml ``config``). The partition segment
-        is omitted entirely when no ``zone`` resolves. For other clouds only the
-        resources override is consulted (behavior unchanged).
+        Supports the ``cloud/cluster/partition`` infra format. For HPC clouds
+        (``slurm``/``lsf`` — see ``_SSH_HPC_CLOUDS``), ``cluster``/``zone`` (the
+        SLURM partition / LSF queue) fall back through the step/build ``config``
+        and then the environment.yaml ``config`` when not set on the resources
+        override, so the partition/queue can be set at any of those layers
+        (precedence: resources override > step or build ``config`` >
+        environment.yaml ``config``). The partition segment is omitted entirely
+        when no ``zone`` resolves. For non-HPC clouds only the resources
+        override is consulted (behavior unchanged).
 
         :param cloud: resolved target cloud (e.g. ``"slurm"``, ``"lsf"``).
         :param override_res: merged step/build launcher ``resources`` dict.
@@ -1104,6 +1105,13 @@ class Skypilot(Environment):
             passed through unchanged (see below). ``sky.Resources`` rejects
             specifying both an ``infra`` that already carries a zone segment and
             a separate ``zone``.
+        :raises ValueError: when an HPC ``zone``/partition resolves without a
+            ``cluster``. SkyPilot's ``cloud/region/zone`` grammar cannot express
+            a partition without a cluster (it rejects an empty middle segment
+            ``cloud//zone`` and rejects a separate ``zone=`` arg alongside
+            ``infra=``), so folding a bare zone into ``cloud/zone`` would
+            silently land the partition in the cluster slot and provision the
+            wrong target — we fail loud instead.
         """
         # An explicit infra string wins outright. A separate ``zone`` (e.g. a
         # SLURM partition alongside a ``cloud/cluster`` infra) is still passed
@@ -1117,7 +1125,7 @@ class Skypilot(Environment):
 
         cluster = override_res.get("cluster")
         zone = override_res.get("zone")
-        if cloud == "slurm":
+        if cloud in _SSH_HPC_CLOUDS:
             env_cfg = self.config.config if self.config else {}
             cluster = cluster or config.get("cluster") or env_cfg.get("cluster")
             zone = zone or config.get("zone") or env_cfg.get("zone")
@@ -1126,8 +1134,18 @@ class Skypilot(Environment):
             infra = f"{cloud}/{cluster}"
             return (f"{infra}/{zone}", None) if zone else (infra, None)
         if zone:
-            # zone without cluster — fold into infra to avoid the "cannot
-            # specify both infra and zone" error in sky.Resources.
+            if cloud in _SSH_HPC_CLOUDS:
+                # SkyPilot cannot express a partition/queue without a cluster
+                # (see :raises: above), so a bare zone here is a misconfig that
+                # would otherwise mislabel the partition as the cluster.
+                raise ValueError(
+                    f"{cloud!r} zone/partition {zone!r} requires a cluster: set "
+                    "`resources.cluster` (or `cluster` in the step/build/"
+                    "environment config). SkyPilot cannot target a partition "
+                    "without a cluster."
+                )
+            # Non-HPC: fold into infra to avoid the "cannot specify both infra
+            # and zone" error in sky.Resources (region/zone share one axis here).
             return (f"{cloud}/{zone}" if cloud else zone, None)
         return cloud, None
 

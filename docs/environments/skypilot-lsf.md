@@ -88,6 +88,13 @@ SkyPilot's `zone` is overloaded per-cloud; for LSF it maps to the **queue** name
 `preemptable`). Recipes that expose a `QUEUE` build parameter typically plumb it through
 `resources.zone` on the step launcher (`zone: "$${QUEUE}"`).
 
+LSF is an HPC cloud, so `cluster` and `zone` (queue) resolve with the same layered precedence as
+SLURM — resources override > step/build `config` > this `environment.yaml` `config` — so the queue
+can be pinned at env level instead of on every launcher. See
+[skypilot-slurm.md](skypilot-slurm.md#cluster--zone) for the full precedence. As there, a `zone`
+(queue) set **without** a `cluster` is rejected: SkyPilot cannot express a queue without a cluster,
+so set a `cluster` alongside it.
+
 ### Autostop is ignored
 
 LSF does not support cluster autostop; gbserver forces `idle_minutes_to_autostop=None` on the `lsf`

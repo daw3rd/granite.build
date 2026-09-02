@@ -62,7 +62,9 @@ See [Inline SkyPilot config](skypilot.md#inline-skypilot-config-cluster_ssh_conf
   `resources.infra`.
 - `zone` maps to the SLURM **partition** (submitted via `--partition`), composed as
   `infra=slurm/<cluster>/<zone>`. It is **omitted entirely when unset**, letting SLURM pick the
-  cluster's default partition.
+  cluster's default partition. A `zone` set **without** a `cluster` is rejected with a clear
+  error: SkyPilot's `cloud/region/zone` grammar cannot place a partition without a cluster, so a
+  bare `zone` would otherwise be silently mislabeled as the cluster — set a `cluster` too.
 
 Both are resolved with the following precedence (highest first), so the partition can be set at
 whichever layer is most convenient:
@@ -74,8 +76,9 @@ whichever layer is most convenient:
    `build.yaml`).
 4. `cluster` / `zone` in this `environment.yaml` `config`.
 
-This precedence is implemented in `Skypilot._resolve_infra_and_zone` and applies to the `slurm`
-cloud only. For a real-cluster example, see the
+This precedence is implemented in `Skypilot._resolve_infra_and_zone` and applies to the HPC
+clouds (`slurm` and `lsf` — see [skypilot-lsf.md](skypilot-lsf.md); non-HPC clouds consult only
+the step launcher's `resources`). For a real-cluster example, see the
 [`skypilot/slurm/ibm-bluevela`](../../configurations/assets/environments/skypilot/slurm/ibm-bluevela/environment.yaml)
 environment (BlueVela's `gpu-mid` partition, reached at `login1`).
 
