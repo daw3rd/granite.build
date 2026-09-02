@@ -187,6 +187,46 @@ class TestSshMerge:
         )
         assert "HostName NEW" in _read(tmp_path / ".slurm" / "config")
 
+    def test_launch_replaces_over_its_own_lease(self, tmp_path):
+        # A launch acquires its lease BEFORE merging (closing the check-then-write
+        # race), then re-materializes a DIFFERING block for the same alias. Its own
+        # holder must be excluded from the replace check so re-keying over its own
+        # stale entry still works — only OTHER live holders block a replace.
+        sc.merge_ssh_blocks(
+            "slurm",
+            sc.render_ssh_hosts([_host("clusterA", HostName="a")], {}),
+            "envA",
+            home=tmp_path,
+        )
+        sc.acquire_lease(tmp_path, "slurm", "L1")
+        sc.merge_ssh_blocks(
+            "slurm",
+            sc.render_ssh_hosts([_host("clusterA", HostName="NEW")], {}),
+            "envA",
+            home=tmp_path,
+            launch_id="L1",  # this launch's own holder is excluded
+        )
+        assert "HostName NEW" in _read(tmp_path / ".slurm" / "config")
+
+    def test_other_live_launch_still_blocks_replace(self, tmp_path):
+        # With another launch's lease live, a differing block is still refused even
+        # when the merging launch passes its own (different) launch_id.
+        sc.merge_ssh_blocks(
+            "slurm",
+            sc.render_ssh_hosts([_host("clusterA", HostName="a")], {}),
+            "envA",
+            home=tmp_path,
+        )
+        sc.acquire_lease(tmp_path, "slurm", "L1")  # another live cluster
+        with pytest.raises(SkypilotConfigCollisionError):
+            sc.merge_ssh_blocks(
+                "slurm",
+                sc.render_ssh_hosts([_host("clusterA", HostName="DIFFERENT")], {}),
+                "envB",
+                home=tmp_path,
+                launch_id="L2",  # excluding self leaves L1 -> replace refused
+            )
+
     def test_foreign_content_preserved_and_differing_alias_conflicts(self, tmp_path):
         dest = tmp_path / ".slurm" / "config"
         dest.parent.mkdir(parents=True)

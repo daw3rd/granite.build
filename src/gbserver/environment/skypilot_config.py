@@ -558,6 +558,7 @@ def merge_ssh_blocks(
     alias_blocks: Dict[str, str],
     env_name: str,
     home: Optional[Path] = None,
+    launch_id: Optional[str] = None,
 ) -> None:
     """Merge rendered SSH ``Host`` blocks into ``~/.<cloud>/config``.
 
@@ -565,17 +566,27 @@ def merge_ssh_blocks(
     :param alias_blocks: ``{alias: block}`` to merge.
     :param env_name: The contributing environment name.
     :param home: Home dir override (tests).
+    :param launch_id: The launch performing this merge, if any. Its own live
+        lease is excluded from the replace check so re-materializing over a
+        stale/dead block still works; a concurrent DIFFERING launch's lease
+        (acquired before its merge) still blocks the replace. ``None`` (non-launch
+        callers/tests) means any live holder blocks a replace.
     :raises SkypilotConfigCollisionError: On a foreign clash, or a differing
-        managed block while a cluster of that cloud is live.
+        managed block while another cluster of that cloud is live.
     """
     if not alias_blocks:
         return
     home_path = _home(home)
     dest = home_path / f".{cloud}" / "config"
     with _THREAD_LOCK, _lock_for(home_path, f"gbserver-{cloud}.lock"):
-        # Read the live-cluster count under the same lock we already hold (call
-        # the lock-free reader; live_cluster_count would re-enter the FileLock).
-        can_replace = len(_read_live_holders(home_path, cloud)) == 0
+        # A differing managed block may be replaced only when no OTHER live
+        # cluster of this cloud depends on it. Read under the same lock we hold
+        # (the lock-free reader; live_cluster_count would re-enter the FileLock)
+        # and exclude this launch's own holder — acquired before this merge — so
+        # re-materializing over its own stale block still works, while a
+        # concurrent differing launch's holder refuses the overwrite.
+        holders = _read_live_holders(home_path, cloud)
+        can_replace = not any(lid != launch_id for lid in holders)
         text = dest.read_text(encoding="utf-8") if dest.exists() else ""
         foreign, existing = _parse_managed(text)
         merged = _merge_ssh(
@@ -717,6 +728,47 @@ def merge_aws_credentials(
         _write_atomic(dest, buf.getvalue(), mode=0o600)
 
 
+def materialize_ssh_for_cloud(
+    env_name: str,
+    ssh: ClusterSshConfigs,
+    secrets: Dict[str, str],
+    cloud: str,
+    *,
+    home: Optional[Path] = None,
+    launch_id: Optional[str] = None,
+) -> None:
+    """Merge one cloud's inline SSH ``Host`` blocks into ``~/.<cloud>/config``.
+
+    Extracted from :func:`materialize` so a launch can (re-)merge just the cloud
+    it is provisioning, under the per-cloud lease it already holds — the replace
+    check then excludes that launch's own holder (see :func:`merge_ssh_blocks`).
+    No-op when the config defines no hosts for ``cloud``.
+
+    :param env_name: The environment name (used in messages).
+    :param ssh: Inline cluster SSH configs.
+    :param secrets: Secret name -> value mapping for field resolution.
+    :param cloud: ``"slurm"`` or ``"lsf"`` — the cloud whose hosts to merge.
+    :param home: Home dir override (tests).
+    :param launch_id: The launch performing this merge, if any. Forwarded to
+        ``merge_ssh_blocks`` (see that function).
+    :raises SkypilotConfigCollisionError: On a foreign clash, or a differing
+        managed block while another cluster of ``cloud`` is live.
+    """
+    hosts = {"slurm": ssh.slurm, "lsf": ssh.lsf}.get(cloud)
+    if not hosts:
+        return
+    # Resolve any IdentityKey directive to a managed key file + IdentityFile
+    # before rendering (keeps render_ssh_host pure).
+    hosts = _materialize_identity_keys(hosts, cloud, secrets, _home(home))
+    merge_ssh_blocks(
+        cloud,
+        render_ssh_hosts(hosts, secrets),
+        env_name,
+        home=home,
+        launch_id=launch_id,
+    )
+
+
 def materialize(
     env_name: str,
     ssh: Optional[ClusterSshConfigs],
@@ -725,6 +777,7 @@ def materialize(
     secrets: Dict[str, str],
     *,
     home: Optional[Path] = None,
+    launch_id: Optional[str] = None,
 ) -> None:
     """Materialize all inline config sections for one environment.
 
@@ -739,16 +792,15 @@ def materialize(
     :param aws_credentials: Inline AWS credential profiles, or ``None``.
     :param secrets: Secret name -> value mapping for field resolution.
     :param home: Home dir override (tests).
+    :param launch_id: The launch driving this materialization, if any. Forwarded
+        to ``merge_ssh_blocks`` so its own live lease is excluded from the
+        replace check (see that function).
     """
     if ssh:
-        for cloud, hosts in (("slurm", ssh.slurm), ("lsf", ssh.lsf)):
-            if hosts:
-                # Resolve any IdentityKey directive to a managed key file +
-                # IdentityFile before rendering (keeps render_ssh_host pure).
-                hosts = _materialize_identity_keys(hosts, cloud, secrets, _home(home))
-                merge_ssh_blocks(
-                    cloud, render_ssh_hosts(hosts, secrets), env_name, home=home
-                )
+        for cloud in ("slurm", "lsf"):
+            materialize_ssh_for_cloud(
+                env_name, ssh, secrets, cloud, home=home, launch_id=launch_id
+            )
     if cloud_config:
         merge_cloud_config(cloud_config, env_name, home=home)
     if aws_credentials:

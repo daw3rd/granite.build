@@ -966,14 +966,19 @@ class Skypilot(Environment):
         )
 
     def _ensure_inline_configs_materialized(self: Self) -> None:
-        """Materialize inline SkyPilot config from environment.yaml (once).
+        """Materialize the non-SSH inline SkyPilot config (once per instance).
 
-        Reads ``cluster_ssh_configs`` / ``cloud_config`` / ``aws_credentials``
-        from the environment's free-form ``config`` block and delegates to
-        ``skypilot_config.materialize``, which writes/merges the SSH config
-        files, the per-request ``SKYPILOT_PROJECT_CONFIG`` override, and
-        ``~/.aws/credentials``. No-op when none are present. Idempotent via an
-        instance flag (and the merge itself), so retry relaunches are free.
+        Reads ``cloud_config`` / ``aws_credentials`` from the environment's
+        free-form ``config`` block and delegates to ``skypilot_config.materialize``
+        (with ``ssh=None``), which writes the per-request
+        ``SKYPILOT_PROJECT_CONFIG`` override and ``~/.aws/credentials``. No-op when
+        neither is present. Idempotent via an instance flag, so retry relaunches
+        are free.
+
+        The SSH config is deliberately NOT materialized here: it is merged
+        per-launch by :meth:`_materialize_ssh_for_launch` under the per-cloud
+        lease, so a concurrent differing-config launch is refused rather than
+        silently clobbering the on-disk config in the check-then-write gap.
 
         :raises SkypilotConfigCollisionError: If a section conflicts with config
             already materialized by another environment in this process/host.
@@ -981,25 +986,124 @@ class Skypilot(Environment):
         if self._inline_configs_done:
             return
         cfg = self.config.config if self.config else {}
-        ssh_raw = cfg.get("cluster_ssh_configs")
         cloud_config = cfg.get("cloud_config")
         aws_raw = cfg.get("aws_credentials")
-        if ssh_raw or cloud_config or aws_raw:
+        if cloud_config or aws_raw:
             from gbserver.environment.skypilot_config import materialize
-            from gbserver.types.environmentconfig import (
-                AwsCredentialProfile,
-                ClusterSshConfigs,
-            )
+            from gbserver.types.environmentconfig import AwsCredentialProfile
 
-            ssh = ClusterSshConfigs.model_validate(ssh_raw) if ssh_raw else None
             aws = (
                 [AwsCredentialProfile.model_validate(p) for p in aws_raw]
                 if aws_raw
                 else None
             )
             name = self.config.name if self.config else "unknown"
-            materialize(name, ssh, cloud_config, aws, self.secrets or {})
+            materialize(name, None, cloud_config, aws, self.secrets or {})
         self._inline_configs_done = True
+
+    def _materialize_ssh_for_launch(self: Self, cloud: str, launch_id: str) -> None:
+        """Merge this env's inline SSH config for ``cloud`` under the held lease.
+
+        Called once per launch, AFTER the per-cloud lease is acquired, so the
+        merge's replace check (see ``merge_ssh_blocks``) excludes this launch's
+        own holder: a concurrent launch wanting a DIFFERING config for ``cloud``
+        is refused at its own merge rather than silently overwriting this launch's
+        on-disk config. Idempotent — an identical block is a no-op, so retry
+        relaunches are free. No-op when the env defines no inline SSH config.
+
+        :param cloud: The HPC cloud being provisioned (``"slurm"``/``"lsf"``).
+        :param launch_id: The launch performing the merge; excluded from the
+            replace check.
+        :raises SkypilotConfigCollisionError: If another live cluster of ``cloud``
+            holds a differing managed block.
+        """
+        cfg = self.config.config if self.config else {}
+        ssh_raw = cfg.get("cluster_ssh_configs")
+        if not ssh_raw:
+            return
+        from gbserver.environment.skypilot_config import materialize_ssh_for_cloud
+        from gbserver.types.environmentconfig import ClusterSshConfigs
+
+        ssh = ClusterSshConfigs.model_validate(ssh_raw)
+        name = self.config.name if self.config else "unknown"
+        materialize_ssh_for_cloud(
+            name, ssh, self.secrets or {}, cloud, launch_id=launch_id
+        )
+
+    def _acquire_socket_lease_as_necessary(
+        self: Self, cloud_group: str, launch_id: str
+    ) -> None:
+        """Acquire the per-cloud lease and merge SSH config for an HPC launch.
+
+        No-op for non-HPC clouds (k8s/aws have no shared SSH config file). For a
+        slurm/lsf launch, in order: (1) optionally clear the shared SkyPilot SSH
+        ControlMaster sockets, (2) acquire the per-cloud usage lease, (3) merge
+        this cloud's SSH config while that lease is held.
+
+        The lease is acquired BEFORE the merge so the merge's replace check (see
+        ``merge_ssh_blocks``) sees this launch's own holder: a concurrent build
+        asking for a DIFFERENT slurm/lsf config is refused at its own merge
+        instead of silently overwriting this launch's on-disk config in the
+        check-then-write gap. The merge excludes this launch's own ``launch_id``,
+        so re-materializing over a stale/dead block still works. The lease is
+        released in ``cleanup_skypilot``.
+
+        :param cloud_group: Normalized target cloud (first infra segment).
+        :param launch_id: The launch acquiring the lease / performing the merge.
+        :raises SkypilotConfigCollisionError: If another live cluster of this
+            cloud holds a differing managed SSH block.
+        """
+        if cloud_group not in _SSH_HPC_CLOUDS:
+            return
+        from gbserver.environment.skypilot_config import (
+            acquire_lease,
+            live_cluster_count,
+        )
+
+        # Opt-in SSH auth refresh (environment config key
+        # `reset_ssh_on_idle_launch`, off by default): a persisted ControlMaster
+        # socket is keyed on (host, port, user) — NOT the SSH key — so an edited
+        # cluster_ssh_config key silently has no effect until the socket expires
+        # (ControlPersist 300s by default, or 1d on SkyPilot's interactive-auth
+        # retry path; the idle timer resets on every reuse, so a busy login
+        # node's socket can effectively never expire). Clearing it forces the
+        # next connection to re-authenticate. Off by default because the socket
+        # root is shared by every SkyPilot SSH connection of this OS user (wide
+        # blast radius); enable it per-environment for clusters that rotate keys.
+        # Additionally gated on EVERY HPC cloud being idle (not just this one):
+        # because the clear is user-wide, an idle slurm launch would otherwise
+        # yank a live lsf build's shared ControlMaster socket (and vice versa),
+        # forcing that in-flight build to re-authenticate mid-run — the very
+        # collision this feature exists to prevent. Checked before acquire_lease
+        # so this launch's own (about-to-be-acquired) lease doesn't count.
+        reset_ssh = bool(
+            self.config.config.get("reset_ssh_on_idle_launch", False)
+            if self.config
+            else False
+        )
+        all_hpc_idle = all(
+            live_cluster_count(Path.home(), c) == 0 for c in _SSH_HPC_CLOUDS
+        )
+        if reset_ssh and all_hpc_idle:
+            _clear_skypilot_ssh_control_sockets()
+        acquire_lease(Path.home(), cloud_group, launch_id)
+        self._materialize_ssh_for_launch(cloud_group, launch_id)
+
+    def _release_socket_lease_as_necessary(self: Self, launch_id: str) -> None:
+        """Release this launch's per-cloud usage lease (acquire-side counterpart).
+
+        Releases the lease keyed by ``launch_id`` for every HPC cloud rather than
+        re-resolving the launch's infra here: only the cloud this launch actually
+        provisioned holds the id, so the rest are cheap no-ops. Idempotent per
+        ``(cloud, launch_id)``, so a double cleanup (e.g. cancel then teardown) is
+        safe. No-op for launches that never held a lease (k8s/aws).
+
+        :param launch_id: The launch whose lease to release.
+        """
+        from gbserver.environment.skypilot_config import release_lease
+
+        for hpc_cloud in _SSH_HPC_CLOUDS:
+            release_lease(Path.home(), hpc_cloud, launch_id)
 
     def _get_cloud(self: Self) -> str:
         """Get default cloud/infra from environment.yaml config."""
@@ -1371,26 +1475,11 @@ class Skypilot(Environment):
         ``launch_skypilot`` doesn't have to re-indent the entire block.
         """
         try:
-            # Materialize inline cluster/cloud/AWS config before the API server
-            # starts and before sky.launch builds the per-request config override.
-            self._ensure_inline_configs_materialized()
-            _ensure_skypilot_api_running()
-
-            # Stash kwargs so retry_workload can replay this launch. Include
-            # targetsteprun_asset_dir so a relaunch re-resolves relative
-            # file_mounts sources (it is a named param, so it is replayed via
-            # launch_skypilot(launch_id, **original_kwargs)).
-            self._launch_kwargs[launch_id] = {
-                "targetsteprun_asset_dir": targetsteprun_asset_dir,
-                "launcher_config": kwargs.get("launcher_config"),
-                "config": kwargs.get("config"),
-                "run_metadata": kwargs.get("run_metadata"),
-                "setup_config": kwargs.get("setup_config"),
-                "retry_enabled": kwargs.get("retry_enabled"),
-                "retry_transparently": kwargs.get("retry_transparently"),
-                "bindings": kwargs.get("bindings"),
-            }
-
+            # Resolve the target cloud FIRST (pure computation off kwargs/env — no
+            # side effects), so the per-cloud lease can be acquired before the SSH
+            # config is materialized below. The lease must precede that merge so
+            # its can_replace check sees this launch's own holder (see the lease
+            # block and merge_ssh_blocks).
             launcher_config = kwargs.get("launcher_config", {}) or {}
             config = kwargs.get("config", {}) or {}
 
@@ -1423,6 +1512,33 @@ class Skypilot(Environment):
             # `infra: "slurm/..."`, an explicit `resources.cloud`, or non-canonical
             # casing — not just the env's default_cloud.
             cloud_group = (str(infra).split("/", 1)[0] or "").lower()
+
+            # Acquire the per-cloud lease and merge this cloud's SSH config (HPC
+            # only; no-op for k8s/aws). Done here — before the non-SSH materialize
+            # and the API start below — so the merge runs under the lease and the
+            # check-then-write race is closed. See the method docstring.
+            self._acquire_socket_lease_as_necessary(cloud_group, launch_id)
+
+            # Materialize non-SSH inline config (cloud_config / AWS creds) before
+            # the API server starts / sky.launch builds the per-request config
+            # override. Idempotent; the SSH merge is handled above under the lease.
+            self._ensure_inline_configs_materialized()
+            _ensure_skypilot_api_running()
+
+            # Stash kwargs so retry_workload can replay this launch. Include
+            # targetsteprun_asset_dir so a relaunch re-resolves relative
+            # file_mounts sources (it is a named param, so it is replayed via
+            # launch_skypilot(launch_id, **original_kwargs)).
+            self._launch_kwargs[launch_id] = {
+                "targetsteprun_asset_dir": targetsteprun_asset_dir,
+                "launcher_config": kwargs.get("launcher_config"),
+                "config": kwargs.get("config"),
+                "run_metadata": kwargs.get("run_metadata"),
+                "setup_config": kwargs.get("setup_config"),
+                "retry_enabled": kwargs.get("retry_enabled"),
+                "retry_transparently": kwargs.get("retry_transparently"),
+                "bindings": kwargs.get("bindings"),
+            }
 
             # Build sky.Resources — merge order is precedence (last wins). The
             # step's config.compute_config (num_cpus_per_node/total_memory_per_node)
@@ -1597,45 +1713,8 @@ class Skypilot(Environment):
             # (normalized first infra segment) computed above.
             autostop = None if cloud_group in _SSH_HPC_CLOUDS else idle_minutes
 
-            # Register a per-cloud usage lease before provisioning reads the SSH
-            # config, so a concurrent build asking for a DIFFERENT slurm/lsf
-            # config is refused at its own merge (and the config can't be
-            # rewritten out from under this live cluster). Released in
-            # cleanup_skypilot. No-op for k8s/aws (no shared SSH config file).
-            if cloud_group in _SSH_HPC_CLOUDS:
-                from gbserver.environment.skypilot_config import (
-                    acquire_lease,
-                    live_cluster_count,
-                )
-
-                # Opt-in SSH auth refresh (environment config key
-                # `reset_ssh_on_idle_launch`, off by default): a persisted
-                # ControlMaster socket is keyed on (host, port, user) — NOT the
-                # SSH key — so an edited cluster_ssh_config key silently has no
-                # effect until the socket expires (ControlPersist 300s by
-                # default, or 1d on SkyPilot's interactive-auth retry path; the
-                # idle timer resets on every reuse, so a busy login node's socket
-                # can effectively never expire). Clearing it forces the next
-                # connection to re-authenticate. Off by default because the socket
-                # root is shared by every SkyPilot SSH connection of this OS user
-                # (wide blast radius); enable it per-environment for clusters that
-                # rotate keys. Additionally gated on EVERY HPC cloud being idle
-                # (not just this one): because the clear is user-wide, an idle
-                # slurm launch would otherwise yank a live lsf build's shared
-                # ControlMaster socket (and vice versa), forcing that in-flight
-                # build to re-authenticate mid-run — the very collision this
-                # feature exists to prevent.
-                reset_ssh = bool(
-                    self.config.config.get("reset_ssh_on_idle_launch", False)
-                    if self.config
-                    else False
-                )
-                all_hpc_idle = all(
-                    live_cluster_count(Path.home(), c) == 0 for c in _SSH_HPC_CLOUDS
-                )
-                if reset_ssh and all_hpc_idle:
-                    _clear_skypilot_ssh_control_sockets()
-                acquire_lease(Path.home(), cloud_group, launch_id)
+            # (The per-cloud usage lease + opt-in SSH-socket clear were acquired
+            # earlier, before the SSH config was materialized — see above.)
 
             # Launch and wait for provisioning, retrying transient
             # resource-acquisition failures (e.g. a just-torn-down slurm/lsf
@@ -2548,13 +2627,8 @@ class Skypilot(Environment):
 
         # Release the per-cloud usage lease first — BEFORE the early-return
         # below, so the cancel-before-launch path (no cluster recorded) still
-        # frees the lease. Idempotent per (cloud, launch_id); releasing every
-        # HPC cloud covers a step that overrode the env's default cloud without
-        # re-resolving infra here (only one holds this launch_id; rest no-op).
-        from gbserver.environment.skypilot_config import release_lease
-
-        for hpc_cloud in _SSH_HPC_CLOUDS:
-            release_lease(Path.home(), hpc_cloud, launch_id)
+        # frees the lease.
+        self._release_socket_lease_as_necessary(launch_id)
 
         self._monitoring_cleanup(launch_id=launch_id)
 
