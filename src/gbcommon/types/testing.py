@@ -122,6 +122,8 @@ def enable_sky_ssh_reset() -> None:
 def disable_sky_ssh_reset() -> None:
     """Disable SkyPilot SSH socket reset by removing GBTEST_SKY_SSH_RESET from the environment."""
     os.environ.pop(ENV_VAR_GBTEST_SKY_SSH_RESET, None)
+
+
 # Which environment's HF resource group a STANDALONE run pushes to (e.g.
 # gbspace-public-staging). Defaults to EMPTY, meaning the production
 # gbspace-public: a real standalone user must land in the production group. Only
