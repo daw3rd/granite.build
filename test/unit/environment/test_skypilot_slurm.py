@@ -217,7 +217,10 @@ class TestSlurmEnvConfigPartition:
             {"default_cloud": "slurm", "cluster": "bluevela", "zone": "gpu-mid"}
         )
         kw = await _launch_and_get_resources(
-            env, "envcfg-1", launcher_config={"run": "hostname", "resources": {}}, config={}
+            env,
+            "envcfg-1",
+            launcher_config={"run": "hostname", "resources": {}},
+            config={},
         )
         assert kw["infra"] == "slurm/bluevela/gpu-mid"
         assert kw["zone"] is None
@@ -226,7 +229,10 @@ class TestSlurmEnvConfigPartition:
     async def test_env_config_cluster_without_zone_omits_partition(self):
         env = _make_env({"default_cloud": "slurm", "cluster": "bluevela"})
         kw = await _launch_and_get_resources(
-            env, "envcfg-2", launcher_config={"run": "hostname", "resources": {}}, config={}
+            env,
+            "envcfg-2",
+            launcher_config={"run": "hostname", "resources": {}},
+            config={},
         )
         assert kw["infra"] == "slurm/bluevela"
         assert kw["zone"] is None
@@ -270,7 +276,10 @@ class TestSlurmEnvConfigPartition:
             {"default_cloud": "lsf", "cluster": "bluevela", "zone": "normal"}
         )
         kw = await _launch_and_get_resources(
-            env, "envcfg-5", launcher_config={"run": "hostname", "resources": {}}, config={}
+            env,
+            "envcfg-5",
+            launcher_config={"run": "hostname", "resources": {}},
+            config={},
         )
         assert kw["infra"] == "lsf"
         assert kw["zone"] is None
@@ -1154,9 +1163,7 @@ class TestSlurmLease:
     async def test_lease_released_on_cleanup_before_early_return(self, slurm_env):
         # No cluster recorded (cancel-before-launch): release must still fire,
         # for every HPC cloud, ahead of the "no cluster to cleanup" early return.
-        with patch(
-            "gbserver.environment.skypilot_config.release_lease"
-        ) as rel:
+        with patch("gbserver.environment.skypilot_config.release_lease") as rel:
             await slurm_env.cleanup_skypilot(launch_id="lease-2")
         released = {c.args[1] for c in rel.call_args_list}
         assert released == {"slurm", "lsf"}
@@ -1222,17 +1229,13 @@ class TestSshControlSocketClear:
         skypilot._clear_skypilot_ssh_control_sockets()
         assert list(control_name_dir.iterdir()) == []
 
-    def test_clears_sockets_across_multiple_control_names(
-        self, tmp_path, monkeypatch
-    ):
+    def test_clears_sockets_across_multiple_control_names(self, tmp_path, monkeypatch):
         # Regression for the literal-"__default__" bug: the on-disk control-name
         # dir is a hash, and there may be more than one; the clear must reach
         # sockets under any subdir, not a name it reconstructs itself.
         from gbserver.environment import skypilot
 
-        monkeypatch.setattr(
-            skypilot, "_ssh_control_socket_dir", lambda: str(tmp_path)
-        )
+        monkeypatch.setattr(skypilot, "_ssh_control_socket_dir", lambda: str(tmp_path))
         socks, keep = [], []
         for name in ("3651d5b8ee", "0a1b2c3d4e"):
             d = tmp_path / name
@@ -1248,9 +1251,7 @@ class TestSshControlSocketClear:
         # never removed — only actual ControlMaster sockets are.
         from gbserver.environment import skypilot
 
-        monkeypatch.setattr(
-            skypilot, "_ssh_control_socket_dir", lambda: str(tmp_path)
-        )
+        monkeypatch.setattr(skypilot, "_ssh_control_socket_dir", lambda: str(tmp_path))
         sub = tmp_path / "3651d5b8ee"
         sub.mkdir()
         sock = _bind_unix_socket(sub, "realsock")  # noqa: F841

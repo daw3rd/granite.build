@@ -372,6 +372,7 @@ RETRY_RELAUNCH_TIMEOUT_SECONDS = 1800
 # off. Compared against the normalized first infra segment (lowercased).
 _SSH_HPC_CLOUDS = ("slurm", "lsf")
 
+
 def _ssh_control_socket_dir() -> Optional[str]:
     """Return SkyPilot's per-user SSH ControlMaster socket *root* directory.
 
