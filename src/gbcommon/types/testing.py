@@ -106,22 +106,15 @@ ENV_VAR_GBTEST_SKY_SSH_RESET = f"{_GBTEST_PREFIX}SKY_SSH_RESET"
 
 
 def is_sky_ssh_reset_enabled() -> bool:
-    """Return True if SkyPilot SSH socket reset is enabled (GBTEST_SKY_SSH_RESET=true)."""
-    return os.getenv(ENV_VAR_GBTEST_SKY_SSH_RESET, "").lower() == "true"
+    """Return True if SkyPilot SSH socket reset is enabled (GBTEST_SKY_SSH_RESET=true).
 
-
-def enable_sky_ssh_reset() -> None:
-    """Enable SkyPilot SSH socket reset for this process and any remote jobs/pods.
-
-    Sets GBTEST_SKY_SSH_RESET in the environment; also forwarded to remote pods
-    via get_exported_gbtest_env_vars().
+    This is the only ``GBTEST_SKY_SSH_RESET`` accessor the runtime needs: the launch
+    gate reads it (skypilot.py) and the constant is forwarded via the exported set
+    below. Tests toggle the var directly (``monkeypatch.setenv``) or set it manually
+    before a live run, so no enable/disable helper is kept here — that would be
+    test-only API in ``src/`` with no runtime caller.
     """
-    os.environ[ENV_VAR_GBTEST_SKY_SSH_RESET] = "true"
-
-
-def disable_sky_ssh_reset() -> None:
-    """Disable SkyPilot SSH socket reset by removing GBTEST_SKY_SSH_RESET from the environment."""
-    os.environ.pop(ENV_VAR_GBTEST_SKY_SSH_RESET, None)
+    return os.getenv(ENV_VAR_GBTEST_SKY_SSH_RESET, "").lower() == "true"
 
 
 # Which environment's HF resource group a STANDALONE run pushes to (e.g.
