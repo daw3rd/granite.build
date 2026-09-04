@@ -3,39 +3,26 @@ type: Skypilot
 subtype: slurm
 config:
   default_cloud: slurm
-  # Autostop is intentionally 0/ignored: SLURM does not support cluster
-  # autostop, so gbserver forces autostop=None for the slurm cloud. Per-step
-  # `sky down` releases the node allocation after each step.
+  # Autostop is ignored: SLURM does not support cluster autostop (gbserver forces
+  # autostop=None), and a per-step `sky down` releases the node allocation.
   idle_minutes_to_autostop: 0
-  # The SSH `Host` alias below must match this; SkyPilot provisions on
-  # infra=slurm/bluevela (composed by skypilot.py from cluster + zone).
+  # infra=slurm/<cluster>/<zone> (here slurm/bluevela/gpu-mid); the SSH `Host`
+  # alias below must match `cluster`, and `zone` is the SLURM partition. Override
+  # layers + precedence: docs/environments/skypilot-slurm.md#cluster--zone.
   cluster: bluevela
-  # SkyPilot's `zone` is overloaded per-cloud: for the slurm backend it maps to
-  # the SLURM partition (submitted via `--partition`). gbserver folds this into
-  # the infra string as slurm/bluevela/gpu-mid. Override per-step/build by
-  # setting `zone` in step.yaml or build.yaml config; omit it entirely to let
-  # SLURM pick the cluster's default partition.
   zone: gpu-mid
-  # Env-level shared filesystem root for per-run build workdirs. gbserver derives
-  # ${shared_workdir}/builds/<build_id>/runs/<targetrun_id>/ from this, exports it
-  # as GB_BUILD_WORKDIR, and makes it the CWD of both the setup and run scripts.
-  # Reuses the LSF BlueVela shared /proj path (same cluster filesystem).
+  # Shared-FS root for per-run build workdirs (exported as GB_BUILD_WORKDIR, and
+  # the CWD of the setup/run scripts). On bluevela this must live on /proj — the
+  # shared FS bind-mounted into the enroot container. Reuses the LSF /proj path.
   shared_workdir: /proj/data-eng/llmb-read-write/builds/
-  # Inline SLURM cluster SSH reachability. gbserver materializes this into
-  # ~/.slurm/config at launch so SkyPilot's SLURM provisioner can reach the login
-  # node and enumerate partitions/nodes. Keys are the exact OpenSSH directive
-  # names (mirrors ~/.slurm/config 1:1). Each value is secret-name-or-literal.
-  # Reuses the LSF BlueVela credentials/key; only HostName differs (login1, the
-  # SLURM login node, vs login4 for LSF). Use `IdentityKey: BV_SSH_PRIVATE_KEY`
-  # (a secret) instead of IdentityFile for CI/CD where no key is on the host.
-  #
-  # NOTE: SkyPilot reuses a persisted SSH ControlMaster socket keyed on
-  # (host, port, user) — NOT the key — so switching the IdentityFile/IdentityKey
-  # below can be masked by a stale connection for the ControlPersist window. When
-  # testing a modified key/credential, set GBTEST_SKY_SSH_RESET=true in gbserver's
-  # environment so it clears those sockets before the launch and the changed
-  # config re-authenticates (also what lets the slurm_bluevela live tests validate
-  # the currently materialized key). Unset in production.
+  # Inline SLURM SSH reachability, materialized to ~/.slurm/config at launch so
+  # SkyPilot's provisioner can reach the login node. Keys are exact OpenSSH
+  # directive names (mirrors ~/.slurm/config 1:1); each value is
+  # secret-name-or-literal. Reuses the LSF BlueVela credentials/key; only
+  # HostName differs (login1 here vs login4 for LSF). For CI/CD with no key on
+  # the host, use `IdentityKey: BV_SSH_PRIVATE_KEY` (a secret) instead of
+  # IdentityFile. Testing a changed key? See the GBTEST_SKY_SSH_RESET re-keying
+  # caveat in docs/environments/skypilot-slurm.md.
   cluster_ssh_configs:
     slurm:
       - Host: bluevela
