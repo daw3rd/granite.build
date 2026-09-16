@@ -78,9 +78,14 @@ whichever layer is most convenient:
 
 This precedence is implemented in `Skypilot._resolve_infra_and_zone` and applies to the HPC
 clouds (`slurm` and `lsf` — see [skypilot-lsf.md](skypilot-lsf.md); non-HPC clouds consult only
-the step launcher's `resources`). For a real-cluster example, the SLURM/BlueVela integration
-fixtures under `test-data/integration/ibm/buildrunner/skypilot/slurm_bluevela/` target BlueVela's
-`gpu-mid` partition (reached at `login1`) via the `bluevela` environment.
+the step launcher's `resources`). Because the resolver ends by falling back to the environment's own
+`config.cluster` / `config.zone`, this env-wide default is **enforced for every step** — including
+step types not listed under `config.steps` (see
+[Per-step-type config defaults](README.md#per-step-type-config-defaults-configstepstype)). A `command`
+step with no `zone` of its own thus lands on the environment's partition, while `hfpull`/`hfpush` listed
+under `config.steps` take their per-type partition. For a real-cluster example, the SLURM/BlueVela
+integration fixtures under `test-data/integration/ibm/buildrunner/skypilot/slurm_bluevela/` target
+BlueVela's `gpu-mid` partition (reached at `login1`) via the `bluevela` environment.
 
 > **The `bluevela` environment lives in a remote space, not this repo.** Those fixtures resolve
 > `space://environments/skypilot/slurm/bluevela` against a remote space (e.g. `gb-test`), which is

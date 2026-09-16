@@ -101,20 +101,28 @@ config:
     command: { zone: gpu-mid }
 ```
 
-A given top-level `config` key is resolved across the following layers, **lowest priority first — a
+This feature adds `config.steps.<type>.<key>` (layer 2 below) and seeds it — for **every** environment
+class — into the matching step's merged `config`, beneath `step_default.yaml`. A step *listed* under
+`config.steps` therefore resolves that key across the following layers, **lowest priority first — a
 later layer overrides an earlier one**:
 
-1. `environment.yaml` `config.<key>` — the env-wide default.
-2. `environment.yaml` `config.steps.<type>.<key>` — the per-step-type default (this feature).
-3. `step_default.yaml`.
-4. `step.yaml`.
-5. `build.yaml` — wins.
+1. `environment.yaml` `config.steps.<type>.<key>` — the per-step-type default (**this feature**).
+2. `step_default.yaml`.
+3. `step.yaml`.
+4. `build.yaml` — wins.
 
-So a per-step-type default overrides the env-wide default but still yields to anything the step or
-build sets. In the example above (`zone` is used only as a concrete key — the mechanism applies to any
-top-level `config` key), a `command` step with no `zone` of its own picks up `gpu-mid`,
-`hfpull`/`hfpush` pick up `io`, and any other step type falls back to the env-wide `normal` — yet a
-`zone` set in that step's `step.yaml` or the target's `build.yaml` still wins over all of them.
+In the example above (`zone` is used only as a concrete key — the mechanism applies to any top-level
+`config` key), a `command` step with no `zone` of its own picks up `gpu-mid` and `hfpull`/`hfpush` pick
+up `io` — yet a `zone` set in that step's `step.yaml` or the target's `build.yaml` still wins over all
+of them.
+
+> **Env-wide default for *unlisted* steps is environment-specific.** The env-wide `config.<key>` (e.g.
+> `zone: normal` above) is the environment's default for that key. Whether a step that is **not** listed
+> under `config.steps` still inherits it depends on the environment — it is not a guarantee of this
+> shared mechanism. Where an environment supports that fallback, it is documented in that environment's
+> own page (for SkyPilot SLURM see
+> [skypilot-slurm.md](skypilot-slurm.md#cluster--zone)). To steer a specific step type on **any**
+> environment class, list it under `config.steps.<type>`.
 
 > **Phase-1 scope.** Only **top-level `config` keys** (such as `zone` and `cluster`) are honored under
 > `config.steps.<type>` today. Per-step `resources` overrides — which live under
