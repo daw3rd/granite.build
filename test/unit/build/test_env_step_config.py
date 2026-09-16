@@ -31,7 +31,7 @@ from gbserver.build.targetstep import (
         ("space://steps/hfpull", "hfpull"),
         ("space://steps/command", "command"),
         ("space://steps/hfpush/", "hfpush"),  # trailing slash tolerated
-        ("hfpull", "hfpull"),                  # bare slug
+        ("hfpull", "hfpull"),  # bare slug
         ("", ""),
         (None, ""),
     ],

@@ -1744,7 +1744,7 @@ class Skypilot(Environment):
                 image_id=image_id,
                 _cluster_config_overrides=cluster_config_overrides or None,
             )
-            
+
             # sky.Resources.__dict__ holds Cloud objects that aren't JSON
             # serializable; to_yaml_config() returns a plain dict (with infra
             # encoding cloud/region/zone), and the accessors expose the resolved
@@ -1843,7 +1843,6 @@ class Skypilot(Environment):
             run_script = cli_prefix + launcher_config.get("run", "")
             if setup_script:
                 setup_script = cli_prefix + setup_script
-
 
             # Build sky.Task
             task = sky.Task(
