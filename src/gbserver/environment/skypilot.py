@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import functools
 import glob
+import json
 import os
 import re
 import shlex
@@ -1731,14 +1732,6 @@ class Skypilot(Environment):
                 or launcher_config.get("image_id")
             ) or None
 
-            logger.info(
-                "SkyPilot resources: accelerators=%s, image_id=%s, "
-                "cluster_config_overrides=%s",
-                res_config.get("accelerators"),
-                image_id,
-                cluster_config_overrides or None,
-            )
-
             resources = sky.Resources(
                 infra=infra,
                 accelerators=res_config.get("accelerators"),
@@ -1750,6 +1743,23 @@ class Skypilot(Environment):
                 zone=zone,
                 image_id=image_id,
                 _cluster_config_overrides=cluster_config_overrides or None,
+            )
+            
+            # sky.Resources.__dict__ holds Cloud objects that aren't JSON
+            # serializable; to_yaml_config() returns a plain dict (with infra
+            # encoding cloud/region/zone), and the accessors expose the resolved
+            # cloud/region/zone directly.
+            logger.info(
+                "SkyPilot launching task with resources: cloud=%s region=%s zone=%s config=%s"
+                " accelerators=%s, image_id=%s,"
+                " cluster_config_overrides=%s",
+                resources.cloud,
+                resources.region,
+                resources.zone,
+                json.dumps(resources.to_yaml_config()),
+                res_config.get("accelerators"),
+                image_id,
+                cluster_config_overrides or None,
             )
 
             # Per-run workdir provisioned by setup_skypilot. Exported as
@@ -1833,6 +1843,7 @@ class Skypilot(Environment):
             run_script = cli_prefix + launcher_config.get("run", "")
             if setup_script:
                 setup_script = cli_prefix + setup_script
+
 
             # Build sky.Task
             task = sky.Task(

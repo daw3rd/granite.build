@@ -79,6 +79,49 @@ assetstores:            # Asset stores accessible from this environment (see bel
 `config:` is a free-form dict interpreted by the environment class. The per-type pages document each
 type's `config:` block.
 
+### Per-step-type config defaults (`config.steps.<type>`)
+
+`config:` may carry an optional `steps:` map that sets **per-step-type defaults** for top-level step
+`config` keys. This lets a single environment steer different step types differently — without editing
+any `build.yaml` — for **any** environment class (Bash, Docker, K8s, Lsf, Skypilot, …); it is not
+specific to one type.
+
+Each key under `steps:` is a **step-type slug** — the *last path segment* of the step URI. So
+`space://steps/hfpull` is `hfpull`, `space://steps/hfpush` is `hfpush`, `space://steps/command` is
+`command`, and so on. Its value is a small map of top-level `config` keys applied only to steps of that
+type.
+
+```yaml
+config:
+  cluster: slurm-docker
+  zone: normal            # env-wide default (any top-level config key works here)
+  steps:
+    hfpull:  { zone: io }
+    hfpush:  { zone: io }
+    command: { zone: gpu-mid }
+```
+
+A given top-level `config` key is resolved across the following layers, **lowest priority first — a
+later layer overrides an earlier one**:
+
+1. `environment.yaml` `config.<key>` — the env-wide default.
+2. `environment.yaml` `config.steps.<type>.<key>` — the per-step-type default (this feature).
+3. `step_default.yaml`.
+4. `step.yaml`.
+5. `build.yaml` — wins.
+
+So a per-step-type default overrides the env-wide default but still yields to anything the step or
+build sets. In the example above (`zone` is used only as a concrete key — the mechanism applies to any
+top-level `config` key), a `command` step with no `zone` of its own picks up `gpu-mid`,
+`hfpull`/`hfpush` pick up `io`, and any other step type falls back to the env-wide `normal` — yet a
+`zone` set in that step's `step.yaml` or the target's `build.yaml` still wins over all of them.
+
+> **Phase-1 scope.** Only **top-level `config` keys** (such as `zone` and `cluster`) are honored under
+> `config.steps.<type>` today. Per-step `resources` overrides — which live under
+> `environment_configs.<Class>.launchers.<name>.config.resources` rather than at the top level — are
+> **not** yet resolved per step type; that is a planned Phase-2 follow-up. Set resource overrides at
+> the step or build layer for now.
+
 ### Sharing step implementations across environments
 
 Steps are resolved relative to the active environment (see
