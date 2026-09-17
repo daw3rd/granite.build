@@ -29,10 +29,10 @@ different workload.
 
 Running it manually
 -------------------
-This test is SKIPPED unless GBTEST_RUN_CUSTOM_CODE_SKYPILOT=1, because it depends
+This test is SKIPPED unless GBTEST_ENABLE_MANUAL_TESTS=1, because it depends
 on external, possibly-unpushed resources. To run it by hand:
 
-1. Set GBTEST_RUN_CUSTOM_CODE_SKYPILOT=1 (and HF_TOKEN with write access to the
+1. Set GBTEST_ENABLE_MANUAL_TESTS=1 (and HF_TOKEN with write access to the
    output repo).
 2. Point the sibling build.yaml's byoc_config at a workload YOU can reach (its
    committed github_url/github_ref/conda_lockfile_path/commands are a concrete
@@ -80,8 +80,8 @@ pytestmark = pytest.mark.ibm
 @extended_testing_only
 @pytest.mark.xdist_group(name="buildtest_bv")
 @pytest.mark.skipif(
-    os.environ.get("GBTEST_RUN_CUSTOM_CODE_SKYPILOT", "") != "1",
-    reason="manual-only e2e: set GBTEST_RUN_CUSTOM_CODE_SKYPILOT=1 (needs local "
+    os.environ.get("GBTEST_ENABLE_MANUAL_TESTS", "") != "1",
+    reason="manual-only e2e: set GBTEST_ENABLE_MANUAL_TESTS=1 (needs local "
     "gb-test+assets clones or a pushed assets branch, the 5 space secrets, "
     "HF write access, and BlueVela SSH)",
 )
