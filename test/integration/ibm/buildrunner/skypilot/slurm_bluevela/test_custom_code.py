@@ -10,18 +10,22 @@
 
 Exercises the bring-your-own-code (BYOC) step end-to-end against the BlueVela
 SLURM environment (space://environments/skypilot/slurm/bluevela, provided by the
-gb-test space): clone a private GHE workload repo, materialize a hash-keyed
-conda/micromamba environment from a conda lockfile, run the workload's start
-command inside that env, capture a directory as the output artifact, and push it
-to hf://. It also asserts the step recorded the resolved commit SHA as
-`commit_hash` step metadata (build lineage). The step runs on the BARE launcher
-node by default (image: ""), bootstrapping a static micromamba binary — no Pyxis
-required; set byoc_config.image to run inside a container on a Pyxis-enabled
-cluster instead.
+gb-test space): clone a GHE workload repo, materialize a hash-keyed conda/
+micromamba environment from a conda lockfile, run the workload's start command
+inside that env, capture a directory as the output artifact, and push it to
+hf://. It also asserts the step recorded the resolved commit SHA as `commit_hash`
+step metadata (build lineage). The committed build.yaml runs INSIDE a container
+image (byoc_config.image = docker.io/library/buildpack-deps:bookworm-scm), the
+SLURM containerized path that needs the Pyxis SPANK plugin BlueVela provides; set
+byoc_config.image to "" to run on the bare launcher node instead (bootstrapping a
+static micromamba binary, no Pyxis).
 
 The fixture (build.yaml + buildtest.yaml) lives in the directory returned by
-_get_yaml_spec_dir below. build.yaml carries TODO(manual) placeholders for the
-workload repo / ref / lockfile / commands / output repo.
+_get_yaml_spec_dir below. build.yaml declares an hf:// input (byoc_input) and an
+hf:// output, so buildrunner brackets the step with an hfpull and an hfpush —
+step_count is 3 (hfpull, custom_code_skypilot, hfpush). Its byoc_config points at
+a concrete GHE repo/ref/lockfile with real commands; adjust those values for a
+different workload.
 
 Running it manually
 -------------------
@@ -30,9 +34,9 @@ on external, possibly-unpushed resources. To run it by hand:
 
 1. Set GBTEST_RUN_CUSTOM_CODE_SKYPILOT=1 (and HF_TOKEN with write access to the
    output repo).
-2. Fill in the TODO(manual) byoc_config values in the sibling build.yaml (real
-   GHE repo, ref, conda_lockfile_path, dependency_files, setup/start commands,
-   dir_to_save, output_name) and the hf:// output repo.
+2. Point the sibling build.yaml's byoc_config at a workload YOU can reach (its
+   committed github_url/github_ref/conda_lockfile_path/commands are a concrete
+   example) and the hf:// output at a repo you can write to.
 3. Ensure the gb-test space provides the 5 space secrets the step needs
    (GITHUB_IBM_PAT, CLEARML_API_HOST/ACCESS_KEY/SECRET_KEY, HF_TOKEN) and the
    BlueVela SSH key, and that you have BlueVela SSH access.

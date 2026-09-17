@@ -5,7 +5,6 @@
 # Single custom_code_skypilot (BYOC) target on BlueVela SLURM (Skypilot): the
 # step clones a private GHE repo, materializes a hash-keyed conda/micromamba env,
 # runs the workload, and captures a directory output pushed to hf://. MANUAL-ONLY
-# (see the test docstring): the build.yaml carries TODO(manual) placeholders.
 targets:
   - custom-code-run
 target_expectations:
