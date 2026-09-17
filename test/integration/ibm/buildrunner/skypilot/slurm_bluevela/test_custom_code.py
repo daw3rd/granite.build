@@ -1,0 +1,90 @@
+# Copyright LLM.build Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+"""BYOC custom_code_skypilot target on BlueVela SLURM (via Skypilot) — MANUAL ONLY.
+
+Exercises the bring-your-own-code (BYOC) step end-to-end against the BlueVela
+SLURM environment (space://environments/skypilot/slurm/bluevela, provided by the
+gb-test space): clone a private GHE workload repo, materialize a hash-keyed
+conda/micromamba environment from a conda lockfile, run the workload's start
+command inside that env, capture a directory as the output artifact, and push it
+to hf://. It also asserts the step recorded the resolved commit SHA as
+`commit_hash` step metadata (build lineage). The step runs on the BARE launcher
+node by default (image: ""), bootstrapping a static micromamba binary — no Pyxis
+required; set byoc_config.image to run inside a container on a Pyxis-enabled
+cluster instead.
+
+The fixture (build.yaml + buildtest.yaml) lives in the directory returned by
+_get_yaml_spec_dir below. build.yaml carries TODO(manual) placeholders for the
+workload repo / ref / lockfile / commands / output repo.
+
+Running it manually
+-------------------
+This test is SKIPPED unless GBTEST_RUN_CUSTOM_CODE_SKYPILOT=1, because it depends
+on external, possibly-unpushed resources. To run it by hand:
+
+1. Set GBTEST_RUN_CUSTOM_CODE_SKYPILOT=1 (and HF_TOKEN with write access to the
+   output repo).
+2. Fill in the TODO(manual) byoc_config values in the sibling build.yaml (real
+   GHE repo, ref, conda_lockfile_path, dependency_files, setup/start commands,
+   dir_to_save, output_name) and the hf:// output repo.
+3. Ensure the gb-test space provides the 5 space secrets the step needs
+   (GITHUB_IBM_PAT, CLEARML_API_HOST/ACCESS_KEY/SECRET_KEY, HF_TOKEN) and the
+   BlueVela SSH key, and that you have BlueVela SSH access.
+
+To run against the UNPUSHED assets step (before the assets branch is pushed):
+
+4. Point buildtest.yaml `space_uri` at a LOCAL gb-test clone (uncomment one of the
+   local alternatives there), and edit that clone's space.yaml so its `base_uris`
+   resolves the step from the local assets clone:
+   `base_uris: [file:///Users/dawood/git/assets]`.
+5. The step.yaml's git+ssh `validator_uri` is cloned EAGERLY by the custom_code
+   validator's constructor (Asset(...).sync during assimilate), and base_uris
+   redirection does NOT apply to it — disabling validation would not avoid this
+   clone. So either push the assets branch, OR temporarily set the local assets
+   clone's step.yaml `validator_uri` to a local file:// path:
+   `file:///Users/dawood/git/assets/steps/custom_code_skypilot/validators`.
+
+All of steps 2, 4, 5 are manual edits to your own clones — never automated.
+
+Note (SSH auth): to validate SSH against a freshly edited key/credential, set
+GBTEST_SKY_SSH_RESET=true in gbserver's environment before running — SkyPilot
+otherwise reuses a persisted SSH ControlMaster socket keyed on (host, port, user),
+not the key, masking an edited cluster_ssh_config for the ControlPersist window.
+Leave it unset for normal runs; the socket clear globs the whole per-user root and
+could yank another parallel skypilot build's socket.
+"""
+
+import os
+from pathlib import Path
+
+import pytest
+from libgbtest.buildrunner.buildtest import (
+    AbstractYamlBuildRunnerTest,
+    get_test_data_dir_for,
+)
+from libgbtest.constants import extended_testing_only
+
+pytestmark = pytest.mark.ibm
+
+
+@extended_testing_only
+@pytest.mark.xdist_group(name="buildtest_bv")
+@pytest.mark.skipif(
+    os.environ.get("GBTEST_RUN_CUSTOM_CODE_SKYPILOT", "") != "1",
+    reason="manual-only e2e: set GBTEST_RUN_CUSTOM_CODE_SKYPILOT=1 (needs local "
+    "gb-test+assets clones or a pushed assets branch, the 5 space secrets, "
+    "HF write access, and BlueVela SSH)",
+)
+class TestSkypilotBlueVelaSlurmCustomCode(AbstractYamlBuildRunnerTest):
+    """BYOC custom_code_skypilot step on BlueVela SLURM: clone → hash-keyed env →
+    workload → hf:// artifact capture + commit_hash lineage."""
+
+    def _get_yaml_spec_dir(self) -> Path:
+        """Return the fixture dir holding this test's build.yaml and buildtest.yaml."""
+        return get_test_data_dir_for(__file__) / "custom_code"
