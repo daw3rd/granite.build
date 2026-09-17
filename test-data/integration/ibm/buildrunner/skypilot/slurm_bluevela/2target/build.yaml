@@ -71,12 +71,13 @@ granite.build:
             poll_interval_seconds: 5
             command_config:
               image: quay.io/itsme/debian:slim
-              # Reads the path bound from first.out1 (proving the cross-target
-              # binding flows through), then writes its own REAL file for the hf
-              # push of out2.
+              # Checks the path bound from first.out1 exists (proving the
+              # cross-target binding flows through), then writes its own REAL file
+              # for the hf push of out2.
               command: >-
+                set -e;
                 echo "second target received first output path: {{ bindings.from_first.binding.path }}";
-                cat {{ bindings.from_first.binding.path }} || echo "first output not readable (ok if pull is a no-op)";
+                test -e {{ bindings.from_first.binding.path }};
                 file=out2.json; echo '{"artifact": "out2", "produced_by": "second"}' > $file;
                 pwd=$(pwd);
                 echo "GB_ARTIFACT_ID:out2 GB_ARTIFACT_PATH:$pwd/$file"
