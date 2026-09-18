@@ -140,23 +140,44 @@ def _env_step_config(env_config: Optional[dict], step_slug: str) -> dict:
     :param step_slug: the step-type slug from :func:`_step_slug_from_uri`.
     :returns: a deep-copied dict of top-level config keys (possibly empty), safe
         to mutate without affecting the live environment config. Never ``None``.
+        Logs at INFO when an override is applied, and at DEBUG (with the
+        configured slugs) when ``config.steps`` is set but has no entry for
+        ``step_slug`` — so a silently-unmatched override (e.g. a typo, or the
+        ``gbstep`` default-step slug) is diagnosable.
     """
     if not isinstance(env_config, dict):
         return {}
     steps = env_config.get("steps")
-    if not isinstance(steps, dict):
+    if not isinstance(steps, dict) or not steps:
         return {}
     entry = steps.get(step_slug)
     if not isinstance(entry, dict):
+        # ``config.steps`` is configured, but has no (dict) entry for this step
+        # type. Log the miss with the configured slugs so an override that
+        # silently did not apply — a typo, or an attempt to steer the default
+        # base step (whose slug is ``gbstep``: an omitted ``step_uri`` defaults
+        # there, not to ``command``/``hfpull``/…) — is diagnosable. Fires once
+        # per unlisted step, so it is DEBUG, not INFO.
+        logger.debug(
+            "No config.steps override for step slug '%s'; configured slugs: %s",
+            step_slug,
+            sorted(steps.keys()),
+        )
         return {}
     # Deep-copy the values: they are held by reference on the long-lived
     # ``self.environment.config.config``. ``merge_dicts`` copies base-only keys
     # by reference, so returning the live nested dicts (e.g. ``launcher_config``)
     # would let a later step's in-place mutation corrupt the environment config
     # for every subsequent step in the run.
-    return {
+    overrides = {
         k: deepcopy(v) for k, v in entry.items() if k != "environment_configs"
     }
+    logger.info(
+        "Applying environment config.steps['%s'] defaults (keys: %s)",
+        step_slug,
+        sorted(overrides.keys()),
+    )
+    return overrides
 
 
 def _seed_step_config_with_env_defaults(

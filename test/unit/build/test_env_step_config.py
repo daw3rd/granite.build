@@ -16,6 +16,8 @@ per-step defaults are the lowest layer, overridden by the step_default.yaml
 config that is merged on top.
 """
 
+import logging
+
 import pytest
 
 from gbserver.build.targetstep import (
@@ -23,6 +25,8 @@ from gbserver.build.targetstep import (
     _seed_step_config_with_env_defaults,
     _step_slug_from_uri,
 )
+
+_TARGETSTEP_LOGGER = "gbserver.build.targetstep"
 
 
 @pytest.mark.parametrize(
@@ -80,6 +84,24 @@ def test_env_step_config_drops_environment_configs_sibling():
     entry = {"zone": "io", "environment_configs": {"Skypilot": {"launchers": {}}}}
     env_config = {"steps": {"hfpull": entry}}
     assert _env_step_config(env_config, "hfpull") == {"zone": "io"}
+
+
+def test_env_step_config_logs_debug_on_unmatched_slug(caplog):
+    # A config.steps key that matches no step type is silently ignored (returns
+    # {}); the DEBUG miss log — listing the configured slugs — is what makes the
+    # silent no-op diagnosable (e.g. the gbstep default-step slug, or a typo).
+    env_config = {"steps": {"hfpull": {"zone": "io"}}}
+    with caplog.at_level(logging.DEBUG, logger=_TARGETSTEP_LOGGER):
+        assert _env_step_config(env_config, "gbstep") == {}
+    assert "No config.steps override for step slug 'gbstep'" in caplog.text
+    assert "hfpull" in caplog.text  # configured slugs are reported
+
+
+def test_env_step_config_logs_info_on_applied_override(caplog):
+    env_config = {"steps": {"hfpull": {"zone": "io"}}}
+    with caplog.at_level(logging.INFO, logger=_TARGETSTEP_LOGGER):
+        assert _env_step_config(env_config, "hfpull") == {"zone": "io"}
+    assert "config.steps['hfpull']" in caplog.text
 
 
 def test_seed_env_is_base_step_default_overrides():

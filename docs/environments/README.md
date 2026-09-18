@@ -101,6 +101,22 @@ config:
     command: { zone: gpu-mid }
 ```
 
+> **The default/base step's slug is `gbstep`.** A target step that omits `step_uri` (or leaves it
+> empty) defaults to the built-in base step at `…/builtins/steps/gbstep`, so its slug — the last path
+> segment — is **`gbstep`**, not the name of any `space://steps/<type>` step. To steer those
+> default steps, key the override on `gbstep`:
+>
+> ```yaml
+> config:
+>   steps:
+>     gbstep: { zone: gpu-mid }   # applies to steps that omit step_uri
+> ```
+>
+> A `config.steps.<slug>` key that matches **no** step type in the build is **silently ignored** (the
+> miss is only logged at `DEBUG`). If an override isn't taking effect, confirm the key equals the step
+> URI's last path segment — `gbstep` for the default base step, `command`/`hfpull`/… for an explicit
+> `space://steps/<type>`.
+
 This feature adds `config.steps.<type>.<key>` (layer 2 below) and seeds it — for **every** environment
 class — into the matching step's merged `config`, beneath `step_default.yaml`. A step *listed* under
 `config.steps` therefore resolves that key across the following layers, **lowest priority first — a
