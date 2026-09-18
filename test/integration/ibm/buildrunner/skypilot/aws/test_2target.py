@@ -18,7 +18,7 @@
 artifact `out1`; `second` binds `first.out1` as an input, echoes the bound path,
 and registers its own output `out2`. This exercises cross-target output -> input
 binding over the env_local (env://) assetstore. It is the AWS analog of the
-sibling ``test/integration/ibm/buildrunner/skypilot/bluevela/test_2target.py``:
+sibling ``test/integration/ibm/buildrunner/skypilot/lsf_bluevela/test_2target.py``:
 bluevela runs on LSF, whereas SkyPilot on AWS provisions a small EC2 instance per
 target (bare command, no container).
 

@@ -15,7 +15,7 @@
 """Integration test: SkyPilot-on-AWS file_mounts copies a step-relative dir.
 
 The AWS analog of the sibling
-``test/integration/ibm/buildrunner/skypilot/bluevela/test_filemount.py``. The
+``test/integration/ibm/buildrunner/skypilot/lsf_bluevela/test_filemount.py``. The
 target runs a custom step (defined in a co-located test space) that declares a
 ``file_mounts`` key copying the ``payload/`` directory shipped next to its
 ``step.yaml`` onto the provisioned EC2 instance. The step's ``run`` command

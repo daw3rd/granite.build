@@ -17,7 +17,7 @@
 Runs a single ``command`` step whose ``command_config.image`` is set, so the
 command executes INSIDE a Docker container on the provisioned EC2 instance. This
 is the AWS analog of the sibling
-``test/integration/ibm/buildrunner/skypilot/bluevela/test_1step_image.py``:
+``test/integration/ibm/buildrunner/skypilot/lsf_bluevela/test_1step_image.py``:
 bluevela runs the image through LSF's enroot, whereas SkyPilot on AWS renders
 ``image_id`` to ``docker:<image>`` and runs it with Docker on the VM.
 
