@@ -59,6 +59,21 @@ def test_env_step_config_handles_none_and_nonmapping():
     assert _env_step_config({"steps": None}, "hfpull") == {}
 
 
+def test_env_step_config_deep_copies_nested_values():
+    # The entry lives on the long-lived environment config; the helper must
+    # return a deep copy so a later in-place mutation of a nested value (e.g.
+    # launcher_config) cannot corrupt the shared config for subsequent steps.
+    launcher = {"nodes": 1}
+    entry = {"launcher_config": launcher}
+    env_config = {"steps": {"hfpull": entry}}
+    result = _env_step_config(env_config, "hfpull")
+    assert result == {"launcher_config": {"nodes": 1}}
+    # mutate the returned nested dict; the source must be untouched
+    result["launcher_config"]["nodes"] = 99
+    assert launcher == {"nodes": 1}
+    assert entry["launcher_config"] is launcher
+
+
 def test_env_step_config_drops_environment_configs_sibling():
     # Phase 1: the environment_configs sibling belongs to subtree-2 (Phase 2)
     # and must NOT leak into the top-level config subtree.

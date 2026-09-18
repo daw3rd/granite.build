@@ -138,7 +138,8 @@ def _env_step_config(env_config: Optional[dict], step_slug: str) -> dict:
     :param env_config: the environment.yaml ``config:`` block
         (``self.environment.config.config``), or ``None``.
     :param step_slug: the step-type slug from :func:`_step_slug_from_uri`.
-    :returns: a dict of top-level config keys (possibly empty). Never ``None``.
+    :returns: a deep-copied dict of top-level config keys (possibly empty), safe
+        to mutate without affecting the live environment config. Never ``None``.
     """
     if not isinstance(env_config, dict):
         return {}
@@ -148,7 +149,14 @@ def _env_step_config(env_config: Optional[dict], step_slug: str) -> dict:
     entry = steps.get(step_slug)
     if not isinstance(entry, dict):
         return {}
-    return {k: v for k, v in entry.items() if k != "environment_configs"}
+    # Deep-copy the values: they are held by reference on the long-lived
+    # ``self.environment.config.config``. ``merge_dicts`` copies base-only keys
+    # by reference, so returning the live nested dicts (e.g. ``launcher_config``)
+    # would let a later step's in-place mutation corrupt the environment config
+    # for every subsequent step in the run.
+    return {
+        k: deepcopy(v) for k, v in entry.items() if k != "environment_configs"
+    }
 
 
 def _seed_step_config_with_env_defaults(
