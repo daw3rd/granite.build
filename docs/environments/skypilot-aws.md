@@ -76,6 +76,12 @@ launchers:
         python train.py
 ```
 
+> **`time_limit` is a no-op on AWS.** The per-step `time_limit` field
+> ([skypilot.md](skypilot.md#envs-post_launch_task-idle_minutes_to_autostop-time_limit)) is a
+> **SLURM-only** per-task knob; SkyPilot exposes no per-task wall-clock override on AWS, so a value set
+> here is ignored (a WARNING is logged). Use `idle_minutes_to_autostop` (a crash safety net) and bound
+> the job inside the `run:` command instead.
+
 ### `shared_workdir`
 
 For cross-step state, point `shared_workdir` at a path backed by **EFS / FSx** mounted on every worker

@@ -80,7 +80,20 @@ config:
           bsub_options:
             G: my-lsf-group
             M: 64G
+            W: 240            # Job wall-clock runlimit in MINUTES (bsub -W).
 ```
+
+### Job wall-clock limit (env-level only)
+
+The per-step `time_limit` field documented for SLURM
+([skypilot-slurm.md](skypilot-slurm.md#time_limit--job-wall-clock-limit)) is a
+**no-op on LSF** — SkyPilot's fork exposes no per-task override for LSF, so a
+`time_limit` set on a step/launcher/env is ignored (gbserver logs a WARNING).
+
+Set the runlimit at the **environment level** instead, via
+`cloud_config.lsf.cluster_configs.<cluster>.bsub_options.W` (minutes) as shown
+above — it maps to `bsub -W` and applies to every job on that cluster. To vary
+it per queue, rely on the queue's own `RUNLIMIT` rather than a per-step value.
 
 ### `zone` → LSF queue
 

@@ -398,6 +398,85 @@ RETRY_RELAUNCH_TIMEOUT_SECONDS = 1800
 # off. Compared against the normalized first infra segment (lowercased).
 _SSH_HPC_CLOUDS = ("slurm", "lsf")
 
+# A per-step time_limit as day/hour/minute units in that order, e.g. "1d6h30m",
+# "4h", "90m". A bare all-digit string (or int) is handled separately as minutes.
+_DURATION_RE = re.compile(
+    r"^\s*(?:(?P<days>\d+)\s*d)?\s*(?:(?P<hours>\d+)\s*h)?"
+    r"\s*(?:(?P<mins>\d+)\s*m)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_duration_to_minutes(value: Union[int, str]) -> int:
+    """Normalize a time-limit value to a whole number of minutes.
+
+    Minutes is the least-ambiguous cross-backend unit: SLURM ``--time`` accepts
+    a bare-minutes integer and LSF ``-W`` is also minutes.
+
+    :param value: an int (minutes), an all-digit string (also minutes), or a
+        compound duration built from day/hour/minute units in that order —
+        e.g. ``"90m"``, ``"4h"``, ``"1d"``, ``"1d6h"``, ``"1d6h30m"``
+        (whitespace and case are ignored).
+    :returns: the duration as a positive integer number of minutes.
+    :raises ValueError: if ``value`` is malformed, has no recognizable units,
+        or is not strictly positive.
+    """
+    # bool is an int subclass; reject it so `time_limit: true` fails loudly.
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid time_limit {value!r}: expected minutes or a duration.")
+    if isinstance(value, int):
+        minutes = value
+    else:
+        text = str(value).strip()
+        if text.isdigit():
+            minutes = int(text)
+        else:
+            match = _DURATION_RE.fullmatch(text)
+            if not match or not any(match.groupdict().values()):
+                raise ValueError(
+                    f"Invalid time_limit {value!r}. Use minutes (e.g. 90) or a "
+                    "duration like '90m', '4h', '1d', '1d6h30m'."
+                )
+            minutes = (
+                int(match.group("days") or 0) * 24 * 60
+                + int(match.group("hours") or 0) * 60
+                + int(match.group("mins") or 0)
+            )
+    if minutes <= 0:
+        raise ValueError(f"Invalid time_limit {value!r}: must be a positive duration.")
+    return minutes
+
+
+def _time_limit_overrides(
+    cloud_group: str, minutes: Optional[int]
+) -> Dict[str, Any]:
+    """Build the ``_cluster_config_overrides`` fragment imposing a per-task
+    wall-clock time limit for the resolved cloud.
+
+    Only SLURM exposes a per-task runlimit override in the SkyPilot fork
+    (``slurm.sbatch_options.time`` -> ``#SBATCH --time``). Every other backend
+    has no per-task channel, so this returns an empty dict and warns, pointing
+    at the environment-level knob (LSF: ``bsub_options.W`` in environment.yaml).
+
+    :param cloud_group: resolved target cloud (first infra segment, lowercased)
+        — e.g. ``"slurm"``, ``"lsf"``, ``"aws"``, ``"kubernetes"``.
+    :param minutes: the wall-clock limit in minutes, or ``None`` for no limit.
+    :returns: a (possibly empty) dict to merge into ``_cluster_config_overrides``.
+    """
+    if minutes is None:
+        return {}
+    if cloud_group == "slurm":
+        # SLURM --time accepts a bare-minutes integer, so render minutes directly.
+        return {"slurm": {"sbatch_options": {"time": str(minutes)}}}
+    logger.warning(
+        "time_limit is set (%d min) but cloud %r has no per-task time-limit "
+        "override in SkyPilot; ignoring it. Set the limit at the environment "
+        "level instead (LSF: cloud_config.lsf...bsub_options.W in minutes).",
+        minutes,
+        cloud_group,
+    )
+    return {}
+
 
 def _ssh_control_socket_dir() -> Optional[str]:
     """Return SkyPilot's per-user SSH ControlMaster socket *root* directory.
@@ -1111,6 +1190,65 @@ class Skypilot(Environment):
             return 10
         return self.config.config.get("idle_minutes_to_autostop", 10)
 
+    def _get_time_limit(self: Self) -> Optional[Union[int, str]]:
+        """Get the default job time_limit from environment.yaml config.
+
+        :returns: the env-level ``time_limit`` (minutes or a duration string),
+            or ``None`` when unset. Applies to all steps unless a step/build
+            ``config`` overrides it.
+        """
+        if self.config is None:
+            return None
+        return self.config.config.get("time_limit")
+
+    def _build_cluster_config_overrides(
+        self: Self,
+        launcher_config: Dict[str, Any],
+        config: Dict[str, Any],
+        cloud_group: str,
+    ) -> Dict[str, Any]:
+        """Assemble the ``_cluster_config_overrides`` mapping for sky.Resources.
+
+        Merges the two config layers — step.yaml ``launcher_config`` and the
+        build.yaml step ``config.launcher_config`` (the latter wins) — into
+        SkyPilot's top-level ``config:`` overrides: docker ``run_options`` and
+        the per-task job wall-clock limit (SLURM ``--time`` today; a no-op on
+        other clouds). The ``time_limit`` precedence mirrors ``image_id``:
+        build.yaml step config > step.yaml launcher_config > env default.
+
+        :param launcher_config: the step.yaml ``launcher_config`` block.
+        :param config: the build.yaml step ``config`` dict; a nested
+            ``launcher_config`` here takes precedence over the step.yaml one.
+        :param cloud_group: resolved target cloud (first infra segment,
+            lowercased); selects the per-cloud time-limit translation.
+        :returns: the overrides dict, empty when neither docker nor a supported
+            time limit applies (pass ``... or None`` to sky.Resources).
+        :raises ValueError: if a set ``time_limit`` is malformed.
+        """
+        overrides: Dict[str, Any] = {}
+
+        docker_config = {
+            **launcher_config.get("docker", {}),
+            **config.get("launcher_config", {}).get("docker", {}),
+        }
+        if docker_config:
+            overrides["docker"] = docker_config
+
+        time_limit_raw = (
+            config.get("launcher_config", {}).get("time_limit")
+            or launcher_config.get("time_limit")
+            or self._get_time_limit()
+        )
+        minutes = (
+            _parse_duration_to_minutes(time_limit_raw) if time_limit_raw else None
+        )
+        # Deep-merge so a per-cloud override never clobbers a sibling key
+        # (e.g. slurm.sbatch_options set for another reason).
+        for key, value in _time_limit_overrides(cloud_group, minutes).items():
+            overrides[key] = {**overrides.get(key, {}), **value}
+
+        return overrides
+
     def _resolve_infra_and_zone(
         self: Self, cloud: str, override_res: dict, config: dict
     ) -> tuple[str, str | None]:
@@ -1712,16 +1850,13 @@ class Skypilot(Environment):
                 **override_res,
             }
 
-            # Build cluster config overrides (docker run_options, etc.)
-            # SkyPilot's top-level `config:` section maps to
-            # _cluster_config_overrides on sky.Resources.
-            cluster_config_overrides = {}
-            docker_config = {
-                **launcher_config.get("docker", {}),
-                **config.get("launcher_config", {}).get("docker", {}),
-            }
-            if docker_config:
-                cluster_config_overrides["docker"] = docker_config
+            # Build SkyPilot's top-level `config:` overrides (docker
+            # run_options, per-task job time limit) — maps to
+            # _cluster_config_overrides on sky.Resources. A malformed
+            # time_limit raises here and fails the launch loudly.
+            cluster_config_overrides = self._build_cluster_config_overrides(
+                launcher_config, config, cloud_group
+            )
 
             # Trailing `or None` maps an empty image_id to None: the merged
             # `command` step renders image_id to "" when no image is given, and

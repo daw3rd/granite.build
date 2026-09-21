@@ -37,6 +37,13 @@ Kubernetes supports autostop, but per-step `cleanup_skypilot()` already runs `sk
 `idle_minutes_to_autostop` (default 10) is a safety net for crashed processes; set `0` for near-immediate
 autostop or `null` to disable.
 
+### `time_limit` is a no-op
+
+The per-step `time_limit` field ([skypilot.md](skypilot.md#envs-post_launch_task-idle_minutes_to_autostop-time_limit))
+is a **SLURM-only** knob. SkyPilot exposes no per-task wall-clock override on Kubernetes, so a
+`time_limit` set here is ignored (a WARNING is logged); bound job runtime inside the `run:` command or
+via a Kubernetes-level policy instead.
+
 ### `shared_workdir`
 
 For cross-step state, point `shared_workdir` at a path backed by a **ReadWriteMany PVC** mounted on

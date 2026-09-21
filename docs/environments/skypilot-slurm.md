@@ -127,6 +127,44 @@ SLURM does not support cluster autostop, so gbserver forces `idle_minutes_to_aut
 step, which releases the node allocation. If you queue more parallel steps than the cluster has nodes,
 the surplus stay PENDING until earlier ones finish and free a node.
 
+### `time_limit` — job wall-clock limit
+
+By default a SkyPilot step inherits the scheduler's wall-clock ceiling — on a
+SLURM partition that is the partition's `MaxTime`/`DefaultTime` (and on managed
+clusters such as BlueVela the admin may impose a fixed limit, e.g. 24h). Set
+`time_limit` to request a specific per-step wall-clock runtime instead. gbserver
+translates it to `#SBATCH --time` on the submitted job.
+
+The value is an integer number of **minutes** or a duration string —
+`"90m"`, `"4h"`, `"1d"`, or a combination like `"1d6h30m"` (day/hour/minute
+units, in that order). A malformed value fails the launch loudly rather than
+silently running unbounded.
+
+It resolves per step with the same precedence as `image_id` (highest first):
+
+1. `config.launcher_config.time_limit` in the build.yaml step.
+2. `time_limit` on the step launcher (`step.yaml`).
+3. `time_limit` in this `environment.yaml` `config` (the env-wide default).
+
+```yaml
+# build.yaml — cap a single step at four hours
+steps:
+  - step_uri: space://steps/command
+    config:
+      launcher_config:
+        time_limit: "4h"       # -> #SBATCH --time=240
+```
+
+Notes:
+
+- `time_limit` requests a ceiling; it **cannot exceed** the partition's
+  `MaxTime`. SLURM rejects a job whose `--time` is above the partition limit, so
+  keep it at or below what the partition (or admin) allows.
+- It is a **SLURM-only per-task knob**. On LSF/aws/kubernetes it is a documented
+  no-op (a WARNING is logged if set); for LSF set the limit at the environment
+  level via `cloud_config.lsf...bsub_options.W` (minutes) — see
+  [skypilot-lsf.md](skypilot-lsf.md).
+
 ### No `image_id` on bare-host clusters
 
 Setting `image_id` on a launcher runs the job in a container, which on SLURM **requires the Pyxis SPANK
@@ -206,6 +244,9 @@ config:
   cluster: slurm-docker
   zone: normal                  # SLURM partition.
   idle_minutes_to_autostop: 0   # Ignored on SLURM; per-step `sky down` handles teardown.
+  # time_limit: "4h"           # Optional env-wide default -> #SBATCH --time; a step
+                                # config.launcher_config.time_limit overrides it. Must
+                                # be <= the partition's MaxTime. Minutes or "90m"/"1d6h".
   shared_workdir: /shared       # Path shared across slurmctld/c1/c2 in the local Docker fixture.
                                 # HF cache defaults to /shared/hf_cache via this declaration.
   cluster_ssh_configs:

@@ -29,6 +29,13 @@ granite.build:
             # Fast completion detection for the test (base skypilot default is
             # 300s; a quick test job finishes in seconds).
             poll_interval_seconds: 5
+            launcher_config:
+              # Smoke-test the per-step job wall-clock limit (-> #SBATCH --time).
+              # Deliberately large (7 days = 10080 min) so it never bounds this
+              # fast job; the local slurm-docker partition is MaxTime=INFINITE, so
+              # SLURM accepts the directive. Verifies time_limit doesn't break the
+              # SLURM launch — see docs/environments/skypilot-slurm.md#time_limit.
+              time_limit: "7d"
             command_config:
               command: >-
                 file=foo1a.json; echo '{"artifact": "output_model1", "file": "foo1a"}' > $file; echo "GB_ARTIFACT_ID:output_model1 GB_ARTIFACT_PATH:$file";

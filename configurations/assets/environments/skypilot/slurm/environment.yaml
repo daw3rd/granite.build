@@ -4,6 +4,11 @@ subtype: slurm
 config:
   default_cloud: slurm
   idle_minutes_to_autostop: 0
+  # Optional env-wide job wall-clock default -> #SBATCH --time. Minutes or a
+  # duration string ("90m"/"4h"/"1d6h30m"); must be <= the partition MaxTime. A
+  # step's config.launcher_config.time_limit overrides this. SLURM-only (no-op on
+  # aws/kubernetes/lsf). See docs/environments/skypilot-slurm.md#time_limit.
+  # time_limit: "4h"
   cluster: slurm-docker
   zone: normal
   shared_workdir: /shared

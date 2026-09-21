@@ -187,6 +187,10 @@ environment_configs:
 
           idle_minutes_to_autostop: 10         # Optional. Per-step override of the env-level value.
                                                # Ignored on slurm/lsf (they don't support autostop).
+
+          time_limit: "4h"                     # Optional. Per-step job wall-clock limit. Minutes or a
+                                               # duration ("90m"/"4h"/"1d6h"). SLURM-only (-> #SBATCH
+                                               # --time); no-op on aws/kubernetes/lsf.
     monitors:
       skypilot_monitor:
         ref: space://monitors/skypilot   # shared monitor (GB_ARTIFACT_* rules, 300s default poll)
@@ -317,13 +321,19 @@ config:
 Use an **absolute** path only when you must hit a fixed location. When `shared_workdir` is *not* set,
 relative destinations fall back to SkyPilot's default (`~/sky_workdir/…`).
 
-#### `envs`, `post_launch_task`, `idle_minutes_to_autostop`
+#### `envs`, `post_launch_task`, `idle_minutes_to_autostop`, `time_limit`
 
 - `envs` — extra environment variables for the job, merged after declared secrets and before
   `config.launcher_config.envs`; the auto-injected `GB_*` vars (below) always win.
 - `post_launch_task.run` — commands run on the host over SSH *after* the job starts (e.g. launching an
   evaluator sidecar). A failure is logged and emitted as a `MESSAGE_EVENT` but does not fail the step.
 - `idle_minutes_to_autostop` — per-step override of the env-level autostop; ignored on `slurm`/`lsf`.
+- `time_limit` — per-step job wall-clock limit; an integer of minutes or a duration string
+  (`"90m"`/`"4h"`/`"1d6h30m"`). Resolves build.yaml `config.launcher_config` > step.yaml launcher >
+  env-level `config.time_limit`. A **SLURM-only** per-task knob today (maps to `#SBATCH --time`, and
+  cannot exceed the partition `MaxTime`); on aws/kubernetes/lsf it is a no-op (WARNING logged). For LSF
+  set the runlimit at env level via `cloud_config.lsf...bsub_options.W`. See
+  [skypilot-slurm.md](skypilot-slurm.md#time_limit--job-wall-clock-limit).
 
 ### Step `config` blocks read by SkyPilot
 
