@@ -1176,6 +1176,35 @@ class Skypilot(Environment):
             return None
         return self.config.config.get("time_limit")
 
+    def _resolve_time_limit_raw(
+        self: Self,
+        launcher_config: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Optional[Union[int, str]]:
+        """Resolve the raw ``time_limit`` across the config layers.
+
+        Precedence (highest first), mirroring ``image_id``: build.yaml step
+        ``config.launcher_config.time_limit`` > step.yaml ``launcher_config``
+        > the ``environment.yaml`` env default.
+
+        Each layer is tested with an explicit ``is not None`` check rather than
+        truthiness, so an explicitly-set falsy value (e.g. ``0`` or ``""``) is
+        *not* treated as unset: it is returned as-is and later rejected loudly by
+        :func:`parse_duration_to_minutes`, instead of silently falling through to
+        the env default and running unbounded.
+
+        :param launcher_config: the step.yaml ``launcher_config`` block.
+        :param config: the build.yaml step ``config`` dict.
+        :returns: the resolved raw value, or ``None`` when no layer sets it.
+        """
+        build_level = config.get("launcher_config", {}).get("time_limit")
+        if build_level is not None:
+            return build_level
+        step_level = launcher_config.get("time_limit")
+        if step_level is not None:
+            return step_level
+        return self._get_time_limit()
+
     def _build_cluster_config_overrides(
         self: Self,
         launcher_config: Dict[str, Any],
@@ -1209,12 +1238,12 @@ class Skypilot(Environment):
         if docker_config:
             overrides["docker"] = docker_config
 
-        time_limit_raw = (
-            config.get("launcher_config", {}).get("time_limit")
-            or launcher_config.get("time_limit")
-            or self._get_time_limit()
+        time_limit_raw = self._resolve_time_limit_raw(launcher_config, config)
+        minutes = (
+            parse_duration_to_minutes(time_limit_raw)
+            if time_limit_raw is not None
+            else None
         )
-        minutes = parse_duration_to_minutes(time_limit_raw) if time_limit_raw else None
         # Deep-merge so a per-cloud override never clobbers a sibling key
         # (e.g. slurm.sbatch_options set for another reason).
         for key, value in _time_limit_overrides(cloud_group, minutes).items():

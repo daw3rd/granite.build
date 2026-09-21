@@ -231,3 +231,31 @@ class TestTimeLimitResolution:
                 },
                 config={},
             )
+
+    @pytest.mark.asyncio
+    async def test_falsy_step_time_limit_not_treated_as_unset(self):
+        # A step explicitly sets an invalid falsy value while the env default is
+        # valid. Precedence uses `is not None`, so the falsy value is NOT skipped
+        # as "unset": it reaches the parser and is rejected loudly rather than
+        # silently falling through to the env default (running unbounded).
+        env = _make_env({"default_cloud": "slurm", "time_limit": "4h"})
+        with pytest.raises(ValueError):
+            await _overrides_for(
+                env,
+                "tl-zero",
+                launcher_config={"run": "hostname", "resources": {}, "time_limit": 0},
+                config={},
+            )
+
+    @pytest.mark.asyncio
+    async def test_falsy_build_time_limit_not_treated_as_unset(self):
+        # Same guarantee for the build.yaml layer: an explicit "" does not fall
+        # through to the (valid) env default.
+        env = _make_env({"default_cloud": "slurm", "time_limit": "4h"})
+        with pytest.raises(ValueError):
+            await _overrides_for(
+                env,
+                "tl-empty",
+                launcher_config={"run": "hostname", "resources": {}},
+                config={"launcher_config": {"time_limit": ""}},
+            )
