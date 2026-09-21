@@ -19,9 +19,10 @@
 from enum import StrEnum, auto
 from typing import Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from gbcommon.types.stepconfig import StepMonitorConfigBase
+from gbcommon.utils.utils import parse_duration_to_minutes
 from gbserver.types.config import Config
 from gbserver.types.validation import GBValidationErrors, GBValidatorConfig
 
@@ -52,6 +53,24 @@ class StepLauncherConfig(Config):
     # Names of env-specific validators to run if this launcher is selected.
     validators: List[str] = Field(default_factory=list)
     config: Optional[Dict] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def check_time_limit(self) -> "StepLauncherConfig":
+        """Fail fast at submission on a malformed launcher ``time_limit``.
+
+        ``time_limit`` is a free-form key inside ``config`` (a per-step job
+        wall-clock limit honored by the SkyPilot SLURM backend). Validating it
+        here — when the merged step.yaml/build.yaml launcher config is parsed,
+        before any step launches — surfaces a typo like ``"4hours"`` at build
+        submission instead of deep inside a launch after earlier steps have run.
+        A no-op when ``config`` carries no ``time_limit``.
+
+        :returns: the validated model instance.
+        :raises ValueError: if ``config['time_limit']`` is set but malformed.
+        """
+        if self.config and self.config.get("time_limit") is not None:
+            parse_duration_to_minutes(self.config["time_limit"])
+        return self
 
 
 class StepValidatorConfig(GBValidatorConfig):

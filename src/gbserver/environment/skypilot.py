@@ -41,6 +41,7 @@ from tenacity import (
 )
 
 from gbcommon.uri.uri import URI
+from gbcommon.utils.utils import parse_duration_to_minutes
 from gbserver.environment.environment import Environment, EventLogLineParserConfig
 from gbserver.spaces.hf_push_config import (
     apply_hf_step_overlay,
@@ -397,57 +398,6 @@ RETRY_RELAUNCH_TIMEOUT_SECONDS = 1800
 # handling groups them: skip the compute_config memory floor and force autostop
 # off. Compared against the normalized first infra segment (lowercased).
 _SSH_HPC_CLOUDS = ("slurm", "lsf")
-
-# A per-step time_limit as day/hour/minute units in that order, e.g. "1d6h30m",
-# "4h", "90m". A bare all-digit string (or int) is handled separately as minutes.
-_DURATION_RE = re.compile(
-    r"^\s*(?:(?P<days>\d+)\s*d)?\s*(?:(?P<hours>\d+)\s*h)?"
-    r"\s*(?:(?P<mins>\d+)\s*m)?\s*$",
-    re.IGNORECASE,
-)
-
-
-def _parse_duration_to_minutes(value: Union[int, str]) -> int:
-    """Normalize a time-limit value to a whole number of minutes.
-
-    Minutes is the least-ambiguous cross-backend unit: SLURM ``--time`` accepts
-    a bare-minutes integer and LSF ``-W`` is also minutes.
-
-    :param value: an int (minutes), an all-digit string (also minutes), or a
-        compound duration built from day/hour/minute units in that order —
-        e.g. ``"90m"``, ``"4h"``, ``"1d"``, ``"1d6h"``, ``"1d6h30m"``
-        (whitespace and case are ignored).
-    :returns: the duration as a positive integer number of minutes.
-    :raises ValueError: if ``value`` is malformed, has no recognizable units,
-        or is not strictly positive.
-    """
-    # bool is an int subclass; reject it so `time_limit: true` fails loudly.
-    if isinstance(value, bool):
-        raise ValueError(
-            f"Invalid time_limit {value!r}: expected minutes or a duration."
-        )
-    if isinstance(value, int):
-        minutes = value
-    else:
-        text = str(value).strip()
-        if text.isdigit():
-            minutes = int(text)
-        else:
-            match = _DURATION_RE.fullmatch(text)
-            if not match or not any(match.groupdict().values()):
-                raise ValueError(
-                    f"Invalid time_limit {value!r}. Use minutes (e.g. 90) or a "
-                    "duration like '90m', '4h', '1d', '1d6h30m'."
-                )
-            minutes = (
-                int(match.group("days") or 0) * 24 * 60
-                + int(match.group("hours") or 0) * 60
-                + int(match.group("mins") or 0)
-            )
-    if minutes <= 0:
-        raise ValueError(f"Invalid time_limit {value!r}: must be a positive duration.")
-    return minutes
-
 
 def _time_limit_overrides(cloud_group: str, minutes: Optional[int]) -> Dict[str, Any]:
     """Build the ``_cluster_config_overrides`` fragment imposing a per-task
@@ -1096,6 +1046,31 @@ class Skypilot(Environment):
             secrets=secrets,
             **kwargs,
         )
+        # Fail fast at submission: reject a malformed env-level time_limit here,
+        # when the environment is constructed, rather than deep inside a launch
+        # after earlier steps have already consumed cluster time.
+        self._validate_env_time_limit()
+
+    def _validate_env_time_limit(self: Self) -> None:
+        """Validate the environment.yaml ``config.time_limit`` at construction.
+
+        The launcher-level ``time_limit`` (step.yaml / build.yaml) is validated
+        separately by :class:`StepLauncherConfig`; this covers the env-level
+        default so every source fails fast at submission rather than at launch.
+
+        :raises ValueError: if the env-level ``time_limit`` is set but malformed
+            (wraps the parser error with the environment name for context).
+        """
+        raw = self._get_time_limit()
+        if raw is None:
+            return
+        try:
+            parse_duration_to_minutes(raw)
+        except ValueError as e:
+            name = self.config.name if self.config else "unknown"
+            raise ValueError(
+                f"environment '{name}': invalid config.time_limit: {e}"
+            ) from e
 
     def _ensure_inline_configs_materialized(self: Self) -> None:
         """Materialize the non-SSH inline SkyPilot config (once per instance).
@@ -1239,7 +1214,7 @@ class Skypilot(Environment):
             or launcher_config.get("time_limit")
             or self._get_time_limit()
         )
-        minutes = _parse_duration_to_minutes(time_limit_raw) if time_limit_raw else None
+        minutes = parse_duration_to_minutes(time_limit_raw) if time_limit_raw else None
         # Deep-merge so a per-cloud override never clobbers a sibling key
         # (e.g. slurm.sbatch_options set for another reason).
         for key, value in _time_limit_overrides(cloud_group, minutes).items():

@@ -137,8 +137,11 @@ translates it to `#SBATCH --time` on the submitted job.
 
 The value is an integer number of **minutes** or a duration string —
 `"90m"`, `"4h"`, `"1d"`, or a combination like `"1d6h30m"` (day/hour/minute
-units, in that order). A malformed value fails the launch loudly rather than
-silently running unbounded.
+units, in that order). A malformed value (e.g. `"4hours"`) is rejected at
+**build submission** — when the step/launcher config is parsed and when the
+environment is loaded — so a typo fails fast, before any step launches, rather
+than deep inside the launch of the offending step after earlier steps have
+already consumed cluster time.
 
 It resolves per step with the same precedence as `image_id` (highest first):
 

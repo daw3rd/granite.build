@@ -22,7 +22,7 @@ import string
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Union
 from uuid import uuid4
 
 # from gbcommon.types.constants import (
@@ -82,6 +82,60 @@ def short_alphanumeric_lower_hash(input_string):
     base64_encoded = base64.b64encode(hash_object.digest()).decode("utf-8")
     base64_encoded = "".join(c for c in base64_encoded if c.isalnum())
     return base64_encoded[:8].lower()
+
+
+# A duration expressed as day/hour/minute units in that order, e.g. "1d6h30m",
+# "4h", "90m". A bare all-digit string (or int) is handled separately as
+# minutes. Lives here (the lowest shared layer) so both the launcher-config
+# pydantic validators and the SkyPilot launch path can validate/parse a
+# `time_limit` without a cross-package import cycle.
+_DURATION_RE = re.compile(
+    r"^\s*(?:(?P<days>\d+)\s*d)?\s*(?:(?P<hours>\d+)\s*h)?"
+    r"\s*(?:(?P<mins>\d+)\s*m)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_duration_to_minutes(value: Union[int, str]) -> int:
+    """Normalize a time-limit value to a whole number of minutes.
+
+    Minutes is the least-ambiguous cross-backend unit: SLURM ``--time`` accepts
+    a bare-minutes integer and LSF ``-W`` is also minutes.
+
+    :param value: an int (minutes), an all-digit string (also minutes), or a
+        compound duration built from day/hour/minute units in that order —
+        e.g. ``"90m"``, ``"4h"``, ``"1d"``, ``"1d6h"``, ``"1d6h30m"``
+        (whitespace and case are ignored).
+    :returns: the duration as a positive integer number of minutes.
+    :raises ValueError: if ``value`` is malformed, has no recognizable units,
+        or is not strictly positive.
+    """
+    # bool is an int subclass; reject it so `time_limit: true` fails loudly.
+    if isinstance(value, bool):
+        raise ValueError(
+            f"Invalid time_limit {value!r}: expected minutes or a duration."
+        )
+    if isinstance(value, int):
+        minutes = value
+    else:
+        text = str(value).strip()
+        if text.isdigit():
+            minutes = int(text)
+        else:
+            match = _DURATION_RE.fullmatch(text)
+            if not match or not any(match.groupdict().values()):
+                raise ValueError(
+                    f"Invalid time_limit {value!r}. Use minutes (e.g. 90) or a "
+                    "duration like '90m', '4h', '1d', '1d6h30m'."
+                )
+            minutes = (
+                int(match.group("days") or 0) * 24 * 60
+                + int(match.group("hours") or 0) * 60
+                + int(match.group("mins") or 0)
+            )
+    if minutes <= 0:
+        raise ValueError(f"Invalid time_limit {value!r}: must be a positive duration.")
+    return minutes
 
 
 # def random_string(length: int = 8):

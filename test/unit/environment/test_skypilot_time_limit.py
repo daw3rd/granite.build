@@ -1,8 +1,10 @@
 """Per-step job time-limit for SkyPilot launches.
 
-Covers the two pure helpers (`_parse_duration_to_minutes`,
-`_time_limit_overrides`) and the end-to-end resolution/precedence that lands
-the limit in `sky.Resources(_cluster_config_overrides=...)`.
+Covers the shared duration parser (`parse_duration_to_minutes`, now in
+`gbcommon.utils.utils`), the `_time_limit_overrides` cloud mapping, the
+submission-time fail-fast validation (`StepLauncherConfig` + the env-level
+default), and the end-to-end resolution/precedence that lands the limit in
+`sky.Resources(_cluster_config_overrides=...)`.
 """
 
 import asyncio
@@ -11,16 +13,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from gbcommon.utils.utils import parse_duration_to_minutes
 from gbserver.environment.skypilot import (
     Skypilot,
-    _parse_duration_to_minutes,
     _time_limit_overrides,
 )
 from gbserver.types.environmentconfig import EnvironmentConfig
+from gbserver.types.stepconfig import StepLauncherConfig
 
 
 # ---------------------------------------------------------------------------
-# Pure helper: _parse_duration_to_minutes
+# Pure helper: parse_duration_to_minutes
 # ---------------------------------------------------------------------------
 class TestParseDurationToMinutes:
     @pytest.mark.parametrize(
@@ -38,7 +41,7 @@ class TestParseDurationToMinutes:
         ],
     )
     def test_valid_values_normalize_to_minutes(self, value, expected):
-        assert _parse_duration_to_minutes(value) == expected
+        assert parse_duration_to_minutes(value) == expected
 
     @pytest.mark.parametrize(
         "value",
@@ -46,7 +49,38 @@ class TestParseDurationToMinutes:
     )
     def test_invalid_values_raise(self, value):
         with pytest.raises(ValueError):
-            _parse_duration_to_minutes(value)
+            parse_duration_to_minutes(value)
+
+
+# ---------------------------------------------------------------------------
+# Fail-fast validation at submission (before any step launches)
+# ---------------------------------------------------------------------------
+class TestSubmissionTimeValidation:
+    """A malformed time_limit must be rejected when its config is parsed,
+    not deferred to the launch of the offending step."""
+
+    @pytest.mark.parametrize("value", ["4h", 240, "1d6h30m"])
+    def test_launcher_config_accepts_valid_time_limit(self, value):
+        cfg = StepLauncherConfig(type="skypilot", config={"time_limit": value})
+        assert cfg.config["time_limit"] == value
+
+    def test_launcher_config_without_time_limit_ok(self):
+        # No time_limit key -> validator is a no-op.
+        StepLauncherConfig(type="skypilot", config={"run": "hostname"})
+
+    @pytest.mark.parametrize("value", ["4hours", "abc", 0, -5, True])
+    def test_launcher_config_rejects_malformed_time_limit(self, value):
+        with pytest.raises(ValueError):
+            StepLauncherConfig(type="skypilot", config={"time_limit": value})
+
+    @pytest.mark.parametrize("value", ["4h", 240, "1d"])
+    def test_env_level_valid_time_limit_constructs(self, value):
+        _make_env({"default_cloud": "slurm", "time_limit": value})
+
+    @pytest.mark.parametrize("value", ["4hours", "abc", 0])
+    def test_env_level_malformed_time_limit_rejected_at_construction(self, value):
+        with pytest.raises(ValueError, match="time_limit"):
+            _make_env({"default_cloud": "slurm", "time_limit": value})
 
 
 # ---------------------------------------------------------------------------
