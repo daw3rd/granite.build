@@ -399,6 +399,7 @@ RETRY_RELAUNCH_TIMEOUT_SECONDS = 1800
 # off. Compared against the normalized first infra segment (lowercased).
 _SSH_HPC_CLOUDS = ("slurm", "lsf")
 
+
 def _time_limit_overrides(cloud_group: str, minutes: Optional[int]) -> Dict[str, Any]:
     """Build the ``_cluster_config_overrides`` fragment imposing a per-task
     wall-clock time limit for the resolved cloud.
