@@ -64,7 +64,6 @@ Leave it unset for normal runs; the socket clear globs the whole per-user root a
 could yank another parallel skypilot build's socket.
 """
 
-import os
 from pathlib import Path
 
 import pytest
@@ -72,19 +71,14 @@ from libgbtest.buildrunner.buildtest import (
     AbstractYamlBuildRunnerTest,
     get_test_data_dir_for,
 )
-from libgbtest.constants import extended_testing_only
+from libgbtest.constants import extended_testing_only, manual_testing_only
 
 pytestmark = pytest.mark.ibm
 
 
 @extended_testing_only
+@manual_testing_only
 @pytest.mark.xdist_group(name="buildtest_bv")
-@pytest.mark.skipif(
-    os.environ.get("GBTEST_ENABLE_MANUAL_TESTS", "") != "1",
-    reason="manual-only e2e: set GBTEST_ENABLE_MANUAL_TESTS=1 (needs local "
-    "gb-test+assets clones or a pushed assets branch, the 5 space secrets, "
-    "HF write access, and BlueVela SSH)",
-)
 class TestSkypilotBlueVelaSlurmCustomCode(AbstractYamlBuildRunnerTest):
     """BYOC custom_code_skypilot step on BlueVela SLURM: clone → hash-keyed env →
     workload → hf:// artifact capture + commit_hash lineage."""
