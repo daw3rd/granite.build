@@ -15,7 +15,7 @@ granite.build:
   # hfpush after the step — step_count is therefore 3 (hfpull, custom_code_skypilot,
   # hfpush). Requires HF_TOKEN with write access to the output repo.
   #
-  # The test is skipped unless GBTEST_ENABLE_MANUAL_TESTS=1).
+  # The test is skipped unless GBTEST_ENABLE_MANUAL_TESTS=1.
   targets:
     custom-code-run:
       environment_uri: space://environments/skypilot/slurm/bluevela

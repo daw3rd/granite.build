@@ -4,7 +4,8 @@
 #
 # Single custom_code_skypilot (BYOC) target on BlueVela SLURM (Skypilot): the
 # step clones a private GHE repo, materializes a hash-keyed conda/micromamba env,
-# runs the workload, and captures a directory output pushed to hf://. MANUAL-ONLY
+# runs the workload, and captures a directory output pushed to hf://.
+# MANUAL-ONLY: skipped unless GBTEST_ENABLE_MANUAL_TESTS=1 (see the test docstring).
 targets:
   - custom-code-run
 target_expectations:
@@ -23,17 +24,17 @@ target_expectations:
     expected_steps:
       - step_uri: space://steps/custom_code_skypilot
         metadata_matches:
-          commit_hash: "[0-9a-f]{40}"
+          commit_hash: "^[0-9a-f]{40}$"
 # Resolve space:// URIs (the bluevela env + the custom_code_skypilot step) from
 # the gb-test space. Default is the remote git repo (the eventual state).
 #
 # MANUAL LOCAL RUN: to test the UNPUSHED assets step, point this at a LOCAL
 # gb-test clone (relative to this YAML's dir, or absolute file://), AND edit that
 # clone's space.yaml so its base_uris resolves the step from the local assets
-# clone: base_uris: [file:///Users/dawood/git/assets]. The step.yaml's
+# clone: base_uris: [file:///path/to/your/assets-clone]. The step.yaml's
 # git+ssh validator_uri is cloned eagerly regardless of base_uris — either push
 # the assets branch or temporarily set validator_uri to
-# file:///Users/dawood/git/assets/steps/custom_code_skypilot/validators in the
+# file:///path/to/your/assets-clone/steps/custom_code_skypilot/validators in the
 # local assets clone (see the test docstring).
 #space_uri: ../../../../../../../../gb-test
 space_uri: git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config

@@ -46,13 +46,13 @@ To run against the UNPUSHED assets step (before the assets branch is pushed):
 4. Point buildtest.yaml `space_uri` at a LOCAL gb-test clone (uncomment one of the
    local alternatives there), and edit that clone's space.yaml so its `base_uris`
    resolves the step from the local assets clone:
-   `base_uris: [file:///Users/dawood/git/assets]`.
+   `base_uris: [file:///path/to/your/assets-clone]`.
 5. The step.yaml's git+ssh `validator_uri` is cloned EAGERLY by the custom_code
    validator's constructor (Asset(...).sync during assimilate), and base_uris
    redirection does NOT apply to it — disabling validation would not avoid this
    clone. So either push the assets branch, OR temporarily set the local assets
    clone's step.yaml `validator_uri` to a local file:// path:
-   `file:///Users/dawood/git/assets/steps/custom_code_skypilot/validators`.
+   `file:///path/to/your/assets-clone/steps/custom_code_skypilot/validators`.
 
 All of steps 2, 4, 5 are manual edits to your own clones — never automated.
 
