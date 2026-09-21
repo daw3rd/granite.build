@@ -143,9 +143,7 @@ requires_k8s = pytest.mark.skipif(
 #
 #   @manual_testing_only
 #   class TestSomethingManual: ...
-GBTEST_ENABLE_MANUAL_TESTS = (
-    os.getenv(ENV_VAR_GBTEST_ENABLE_MANUAL_TESTS, "") == "1"
-)
+GBTEST_ENABLE_MANUAL_TESTS = os.getenv(ENV_VAR_GBTEST_ENABLE_MANUAL_TESTS, "") == "1"
 
 manual_testing_only = pytest.mark.skipif(
     not GBTEST_ENABLE_MANUAL_TESTS,
