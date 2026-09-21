@@ -7,17 +7,16 @@ the limit in `sky.Resources(_cluster_config_overrides=...)`.
 
 import asyncio
 import logging
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from gbserver.environment.skypilot import (
     Skypilot,
-    _time_limit_overrides,
     _parse_duration_to_minutes,
+    _time_limit_overrides,
 )
 from gbserver.types.environmentconfig import EnvironmentConfig
-
-from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------

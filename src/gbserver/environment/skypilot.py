@@ -423,7 +423,9 @@ def _parse_duration_to_minutes(value: Union[int, str]) -> int:
     """
     # bool is an int subclass; reject it so `time_limit: true` fails loudly.
     if isinstance(value, bool):
-        raise ValueError(f"Invalid time_limit {value!r}: expected minutes or a duration.")
+        raise ValueError(
+            f"Invalid time_limit {value!r}: expected minutes or a duration."
+        )
     if isinstance(value, int):
         minutes = value
     else:
@@ -447,9 +449,7 @@ def _parse_duration_to_minutes(value: Union[int, str]) -> int:
     return minutes
 
 
-def _time_limit_overrides(
-    cloud_group: str, minutes: Optional[int]
-) -> Dict[str, Any]:
+def _time_limit_overrides(cloud_group: str, minutes: Optional[int]) -> Dict[str, Any]:
     """Build the ``_cluster_config_overrides`` fragment imposing a per-task
     wall-clock time limit for the resolved cloud.
 
@@ -1239,9 +1239,7 @@ class Skypilot(Environment):
             or launcher_config.get("time_limit")
             or self._get_time_limit()
         )
-        minutes = (
-            _parse_duration_to_minutes(time_limit_raw) if time_limit_raw else None
-        )
+        minutes = _parse_duration_to_minutes(time_limit_raw) if time_limit_raw else None
         # Deep-merge so a per-cloud override never clobbers a sibling key
         # (e.g. slurm.sbatch_options set for another reason).
         for key, value in _time_limit_overrides(cloud_group, minutes).items():
