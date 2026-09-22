@@ -76,6 +76,12 @@ launchers:
         python train.py
 ```
 
+> **`sbatch_options` is a no-op on AWS.** The per-step `sbatch_options` field
+> ([skypilot.md](skypilot.md#config-overrides-docker-sbatch_options)) is a
+> **SLURM-only** knob; SkyPilot exposes no per-task equivalent on AWS, so a value
+> set here is ignored (a WARNING is logged). Bound a job's runtime inside the
+> `run:` command instead, with `idle_minutes_to_autostop` as a crash safety net.
+
 ### `shared_workdir`
 
 For cross-step state, point `shared_workdir` at a path backed by **EFS / FSx** mounted on every worker

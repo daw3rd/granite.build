@@ -1112,6 +1112,38 @@ class Skypilot(Environment):
             return 10
         return self.config.config.get("idle_minutes_to_autostop", 10)
 
+    def _resolve_sbatch_options(
+        self: Self,
+        launcher_config: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Merge the per-step SLURM ``sbatch_options`` across the config layers.
+
+        ``sbatch_options`` is a free-form map of SLURM ``#SBATCH`` directives
+        (e.g. ``time``, ``gres``, ``qos``, ``account``) forwarded verbatim to the
+        SkyPilot SLURM backend via ``_cluster_config_overrides``. Layers are
+        merged **per key** (highest precedence last), so a step may override a
+        single directive (e.g. ``time``) while still inheriting the env-level
+        default for the others:
+
+        1. ``environment.yaml`` ``config.sbatch_options`` (env-wide default).
+        2. ``step.yaml`` ``launcher_config.sbatch_options``.
+        3. ``build.yaml`` step ``config.launcher_config.sbatch_options`` (wins).
+
+        :param launcher_config: the step.yaml ``launcher_config`` block.
+        :param config: the build.yaml step ``config`` dict; a nested
+            ``launcher_config`` here takes precedence over the step.yaml one.
+        :returns: the merged ``sbatch_options`` map, empty when no layer sets it.
+        """
+        env_default = (
+            self.config.config.get("sbatch_options", {}) if self.config else {}
+        )
+        return {
+            **env_default,
+            **launcher_config.get("sbatch_options", {}),
+            **config.get("launcher_config", {}).get("sbatch_options", {}),
+        }
+
     def _resolve_infra_and_zone(
         self: Self, cloud: str, override_res: dict, config: dict
     ) -> tuple[str, str | None]:
@@ -1725,6 +1757,29 @@ class Skypilot(Environment):
             }
             if docker_config:
                 cluster_config_overrides["docker"] = docker_config
+
+            # Per-step SLURM sbatch directives (--time, --gres, --qos, ...).
+            # SLURM is the only cloud whose SkyPilot fork exposes a per-task
+            # sbatch_options override; on any other cloud it is a documented
+            # no-op (warn and drop). Deep-merge under `slurm` so a sibling
+            # slurm.* override is never clobbered.
+            sbatch_options = self._resolve_sbatch_options(launcher_config, config)
+            if sbatch_options:
+                if cloud_group == "slurm":
+                    slurm_over = cluster_config_overrides.get("slurm", {})
+                    cluster_config_overrides["slurm"] = {
+                        **slurm_over,
+                        "sbatch_options": {
+                            **slurm_over.get("sbatch_options", {}),
+                            **sbatch_options,
+                        },
+                    }
+                else:
+                    logger.warning(
+                        "sbatch_options is set but cloud %r is not SLURM; "
+                        "ignoring it.",
+                        cloud_group,
+                    )
 
             # Trailing `or None` maps an empty image_id to None: the merged
             # `command` step renders image_id to "" when no image is given, and

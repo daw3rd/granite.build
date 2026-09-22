@@ -127,6 +127,46 @@ SLURM does not support cluster autostop, so gbserver forces `idle_minutes_to_aut
 step, which releases the node allocation. If you queue more parallel steps than the cluster has nodes,
 the surplus stay PENDING until earlier ones finish and free a node.
 
+### `sbatch_options` — SLURM `#SBATCH` directives
+
+By default a SkyPilot step inherits the partition's scheduling defaults (its
+`DefaultTime`/`MaxTime`, default `--gres`, etc.). Set `sbatch_options` to a map
+of SLURM directive names (without the leading `--`) to forward them verbatim to
+the submitted job's `#SBATCH` lines — most commonly `time`, but any directive
+works (`gres`, `qos`, `account`, `constraint`, `nodelist`, …).
+
+```yaml
+# build.yaml — cap a step at four hours and request two GPUs
+steps:
+  - step_uri: space://steps/command
+    config:
+      launcher_config:
+        sbatch_options:
+          time: "4:00:00"     # -> #SBATCH --time=4:00:00
+          gres: "gpu:2"       # -> #SBATCH --gres=gpu:2
+```
+
+Values use SLURM's own formats — e.g. `time` accepts bare minutes (`240`),
+`MM:SS`, `HH:MM:SS` (`"4:00:00"`), or `D-HH:MM:SS` (`"7-00:00:00"`).
+
+It resolves per step, merged **per key** (highest precedence last), so a step can
+override one directive while inheriting the rest:
+
+1. `sbatch_options` in this `environment.yaml` `config` (env-wide default).
+2. `sbatch_options` on the step launcher (`step.yaml`).
+3. `config.launcher_config.sbatch_options` in the build.yaml step (wins).
+
+Notes:
+
+- `time` requests a ceiling; it **cannot exceed** the partition's `MaxTime` —
+  SLURM rejects a job whose `--time` is above the partition limit, so keep it at
+  or below what the partition (or admin) allows.
+- It is a **SLURM-only** knob (maps to per-task `sbatch_options` in SkyPilot's
+  fork). On lsf/aws/kubernetes it is a no-op (a WARNING is logged if set); for
+  LSF set the runlimit at the environment level via
+  `cloud_config.lsf...bsub_options.W` (minutes) — see
+  [skypilot-lsf.md](skypilot-lsf.md).
+
 ### No `image_id` on bare-host clusters
 
 Setting `image_id` on a launcher runs the job in a container, which on SLURM **requires the Pyxis SPANK
