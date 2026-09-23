@@ -691,6 +691,11 @@ def _is_interactive_auth_stdin_failure(exc: BaseException) -> bool:
     return False
 
 
+from gbserver.environment._skypilot_metadata import (
+    apply_slurm_comment_override,
+    normalize_run_metadata,
+    task_metadata_labels,
+)
 from gbserver.environment._skypilot_ssh import (
     execute_on_host_via_ssh as _execute_on_host_via_ssh,
 )
@@ -1803,13 +1808,9 @@ class Skypilot(Environment):
             config = kwargs.get("config", {}) or {}
 
             attempt = self._relaunch_attempts.get(launch_id, 0)
-            run_metadata = kwargs.get("run_metadata") or {}
-            # run_metadata is normally a dict here; tolerate an
-            # EntityRunMetadata object defensively (codebase passes both shapes).
-            if not isinstance(run_metadata, dict):
-                run_metadata = (
-                    run_metadata.to_dict() if hasattr(run_metadata, "to_dict") else {}
-                )
+            # run_metadata is normally a dict here, but the codebase also passes
+            # an EntityRunMetadata object; normalize to a plain dict.
+            run_metadata = normalize_run_metadata(kwargs.get("run_metadata"))
             cluster_name = self._cluster_name_for(
                 launch_id,
                 attempt,
@@ -1903,6 +1904,14 @@ class Skypilot(Environment):
                 **((config.get("launcher_config") or {}).get("docker") or {}),
             }
 
+            # Attach build-tracking metadata as a SLURM --comment (searchable via
+            # sjob/squeue/sacct). Safe to set unconditionally: only the SLURM
+            # backend reads it; the slurm section is inert on k8s/cloud/LSF.
+            # Applied BEFORE the per-step sbatch_options merge below so that
+            # deep-merge preserves the comment (an explicit user `comment` in
+            # sbatch_options still wins, as it is merged last).
+            apply_slurm_comment_override(cluster_config_overrides, run_metadata)
+
             # Per-step SLURM sbatch directives (--time, --gres, --qos, ...).
             # SLURM is the only cloud whose SkyPilot fork exposes a per-task
             # sbatch_options override; on any other cloud it is a documented
@@ -1966,6 +1975,9 @@ class Skypilot(Environment):
                 use_spot=res_config.get("use_spot"),
                 zone=zone,
                 image_id=image_id,
+                # Build-tracking labels. SkyPilot applies these on k8s (pod
+                # labels) and cloud (instance tags); ignored on SLURM/LSF.
+                labels=task_metadata_labels(run_metadata) or None,
                 _cluster_config_overrides=cluster_config_overrides or None,
             )
 
@@ -1997,7 +2009,8 @@ class Skypilot(Environment):
             # GB_BUILD_WORKDIR (inside get_launch_env_vars) and also used below
             # as the initial CWD of the run script and the remap target for
             # relative file_mounts, so it is computed here as a local.
-            run_metadata = kwargs.get("run_metadata", {})
+            # (run_metadata is intentionally NOT re-read here: the normalized
+            # dict from the top of the method stays in effect through this call.)
             build_workdir = (
                 kwargs.get("setup_config", {}).get("skypilot", {}).get("build_workdir")
             )
