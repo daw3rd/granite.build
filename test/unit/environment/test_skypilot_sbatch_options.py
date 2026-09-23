@@ -72,6 +72,18 @@ class TestResolveSbatchOptions:
         # env's `qos` is overridden by the step.
         assert merged == {"time": 30, "qos": "high"}
 
+    def test_null_keys_coerced_to_empty(self):
+        # A bare (present-but-null) YAML key parses to None; every layer must
+        # tolerate it rather than crash the merge with a None operand.
+        env = _make_env({"default_cloud": "slurm", "sbatch_options": None})
+        assert (
+            env._resolve_sbatch_options(
+                {"sbatch_options": None},  # bare `sbatch_options:` in step.yaml
+                {"launcher_config": None},  # bare `launcher_config:` in build.yaml
+            )
+            == {}
+        )
+
 
 # ---------------------------------------------------------------------------
 # End-to-end merge into sky.Resources(_cluster_config_overrides=...)

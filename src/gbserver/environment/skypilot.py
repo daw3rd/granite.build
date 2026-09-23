@@ -1135,13 +1135,15 @@ class Skypilot(Environment):
             ``launcher_config`` here takes precedence over the step.yaml one.
         :returns: the merged ``sbatch_options`` map, empty when no layer sets it.
         """
-        env_default = (
-            self.config.config.get("sbatch_options", {}) if self.config else {}
-        )
+        # Each layer is coerced with ``or {}`` so a bare (present-but-null)
+        # ``sbatch_options:`` / ``launcher_config:`` YAML key resolves to an
+        # empty map rather than crashing the merge with a ``None`` operand
+        # (matches the ``or {}`` guarding used elsewhere in this module).
+        env_cfg = self.config.config if self.config else {}
         return {
-            **env_default,
-            **launcher_config.get("sbatch_options", {}),
-            **config.get("launcher_config", {}).get("sbatch_options", {}),
+            **(env_cfg.get("sbatch_options") or {}),
+            **(launcher_config.get("sbatch_options") or {}),
+            **((config.get("launcher_config") or {}).get("sbatch_options") or {}),
         }
 
     def _resolve_infra_and_zone(
@@ -1751,9 +1753,12 @@ class Skypilot(Environment):
             # SkyPilot's top-level `config:` section maps to
             # _cluster_config_overrides on sky.Resources.
             cluster_config_overrides = {}
+            # `or {}` per layer so a bare (present-but-null) `docker:` /
+            # `launcher_config:` YAML key resolves to an empty map rather than
+            # crashing the merge with a None operand.
             docker_config = {
-                **launcher_config.get("docker", {}),
-                **config.get("launcher_config", {}).get("docker", {}),
+                **(launcher_config.get("docker") or {}),
+                **((config.get("launcher_config") or {}).get("docker") or {}),
             }
             if docker_config:
                 cluster_config_overrides["docker"] = docker_config
