@@ -160,7 +160,7 @@ Values use SLURM's own formats — e.g. `time` accepts bare minutes (`240`),
 >
 > | Protected key (dropped) | Set this instead |
 > |---|---|
-> | `gres` | `launcher_config.resources.accelerators` (e.g. `"H100:2"` → `--gres=gpu:H100:2`; bare `"2"` → `--gres=gpu:2`) |
+> | `gres` | `launcher_config.resources.accelerators` — typed `"H100:2"` → `--gres=gpu:H100:2`, or untyped `":2"` → `--gres=gpu:2`. Always quote the value (a YAML int like `2` errors, and a bare `"2"` is read as *type* `2`, count 1 → `--gres=gpu:2:1`). |
 > | `cpus-per-task` | `compute_config.num_cpus_per_node`, or `resources.cpus` |
 > | `mem` | `resources.memory` (the `compute_config.total_memory_per_node` floor is intentionally skipped on slurm/lsf, so set an explicit `resources.memory`) |
 > | `partition` | the `infra` string / `zone` (`"slurm/<cluster>/<partition>"`) — see [`cluster` / `zone`](#cluster--zone) |
