@@ -118,6 +118,7 @@ The run-relevant environment variables:
 | `GBSERVER_DEFAULT_BUILDRUNNER_TYPE` | `job` (k8s), `process`, or `thread`. Use `thread` for local test runs. |
 | `GBTEST_SPS_IBMCLOUD_API_KEY` | Loads test secrets from IBM Cloud Secrets Manager (SPS). |
 | `GBTEST_STANDALONE_ENVIRONMENT` | Under `GB_ENVIRONMENT=STANDALONE`, which environment's HF resource group pushes target. The **source** default is empty, i.e. the production `gbspace-public` a real standalone user must get; `test/conftest.py` defaults it to `STAGING` for any pytest run, so tests push to a group the CI token can write. Set it explicitly (including to empty) to override. |
+| `GBTEST_ENABLE_MANUAL_TESTS` | Set to `1` to run tests marked `@manual_testing_only` (from `libgbtest.constants`) — manual-only tests that depend on external, possibly-unpushed resources (private repos, unpushed assets steps, cluster SSH, real secrets). Skipped otherwise, including in CI. See the test's docstring for its specific prerequisites. |
 | `GBTEST_SPS_ENABLE_ENV_VAR_OVERRIDE` | When `true`, a locally-set env var supersedes the value `conftest.set_test_env` fetches from SPS (default `false`, so the SPS secret wins). Set it alongside a local write `HF_TOKEN` to push with your own token instead of the shared `hf-token` secret (see the hf:// push note below). |
 | **IBM infrastructure** | For `ibm`-marked / live-cluster tests: |
 | `GBSERVER_IMAGE_TAG` | The gbserver build-runner image tag to run against. |
