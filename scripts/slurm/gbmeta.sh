@@ -33,9 +33,12 @@ fetch_comment() {
   local jobid="$1" comment=""
   if command -v scontrol >/dev/null 2>&1; then
     # scontrol -o prints one line of space-separated Key=Value pairs; our
-    # comment value has no spaces, so it ends at the next whitespace.
+    # comment value has no spaces, so it ends at the next whitespace. Anchor on
+    # a field boundary (start-of-line or a space) so the "Comment=" substring
+    # inside AdminComment=/SystemComment= is not matched instead.
     comment="$(scontrol show job "$jobid" -o 2>/dev/null \
-      | grep -oE 'Comment=[^[:space:]]+' | head -n1 | cut -d= -f2- || true)"
+      | grep -oE '(^| )Comment=[^[:space:]]+' | head -n1 \
+      | sed 's/^ //' | cut -d= -f2- || true)"
   fi
   if [ -z "$comment" ] && command -v sacct >/dev/null 2>&1; then
     comment="$(sacct -j "$jobid" -o Comment%-200 -Pn 2>/dev/null \
@@ -50,14 +53,15 @@ fetch_comment() {
 # intact (e.g. step_uri=space://steps/foo).
 render() {
   local comment="$1"
-  # If a wider line was piped (e.g. a scontrol/sacct row), isolate just the
-  # SLURM comment value: everything after "Comment=" up to the next whitespace.
-  case "$comment" in
-    *Comment=*)
-      comment="${comment#*Comment=}"   # drop up to & including the first Comment=
-      comment="${comment%%[[:space:]]*}"  # keep up to the next whitespace
-      ;;
-  esac
+  # If a wider line was piped (e.g. a scontrol -o row carrying AdminComment=,
+  # Comment= and SystemComment= together), isolate just the real Comment value.
+  # Anchor on a field boundary (start-of-line or a space) so the "Comment="
+  # substring inside AdminComment=/SystemComment= is not matched instead.
+  if printf '%s' "$comment" | grep -qE '(^| )Comment='; then
+    comment="$(printf '%s' "$comment" \
+      | grep -oE '(^| )Comment=[^[:space:]]+' | head -n1 \
+      | sed 's/^ //' | cut -d= -f2-)"
+  fi
   # Emit one aligned line per key=value pair; count them so an empty/"(null)"
   # comment reports "not found" rather than printing nothing and succeeding.
   printf '%s' "$comment" | tr ';' '\n' | awk -F= '
