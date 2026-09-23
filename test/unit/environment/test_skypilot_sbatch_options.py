@@ -73,6 +73,9 @@ class TestResolveSbatchOptions:
 class TestSbatchOptionsLaunch:
     @pytest.mark.asyncio
     async def test_step_level_reaches_sbatch_options(self):
+        # gbserver forwards the map verbatim; keys use documented pass-through
+        # directives (SkyPilot itself drops protected keys like `gres` — that
+        # happens downstream, not here). See skypilot-slurm.md#sbatch_options.
         env = _make_env({"default_cloud": "slurm"})
         overrides = await _overrides_for(
             env,
@@ -80,11 +83,11 @@ class TestSbatchOptionsLaunch:
             launcher_config={
                 "run": "hostname",
                 "resources": {},
-                "sbatch_options": {"time": 240, "gres": "gpu:2"},
+                "sbatch_options": {"time": 240, "qos": "high"},
             },
             config={},
         )
-        assert overrides["slurm"]["sbatch_options"] == {"time": 240, "gres": "gpu:2"}
+        assert overrides["slurm"]["sbatch_options"] == {"time": 240, "qos": "high"}
 
     @pytest.mark.asyncio
     async def test_env_default_applies_when_step_unset(self):

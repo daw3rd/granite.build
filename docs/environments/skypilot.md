@@ -168,8 +168,10 @@ environment_configs:
             run_options:          # The `docker` and (SLURM-only) `sbatch_options` sections are passed
               - "--shm-size=8g"   # through per-step; other SkyPilot config belongs in env `cloud_config`.
           sbatch_options:         # Optional, SLURM-only. #SBATCH directives (no `--`), forwarded verbatim.
-            time: "4:00:00"       # e.g. --time=4:00:00, --gres=gpu:2. No-op on aws/k8s/lsf (WARNING).
-            gres: "gpu:2"
+            time: "4:00:00"       # e.g. --time=4:00:00, --qos=high. No-op on aws/k8s/lsf (WARNING).
+            qos: high             # NOTE: SkyPilot-managed keys (gres, mem, cpus-per-task, partition,
+                                  # nodes, ...) are silently dropped — use resources.accelerators etc.
+                                  # See skypilot-slurm.md#sbatch_options--slurm-sbatch-directives.
 
           # ---- sky.Task ----
           setup: |                # Optional. Run once at cluster bring-up (cached across reuse).

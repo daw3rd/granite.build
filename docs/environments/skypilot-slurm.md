@@ -132,22 +132,42 @@ the surplus stay PENDING until earlier ones finish and free a node.
 By default a SkyPilot step inherits the partition's scheduling defaults (its
 `DefaultTime`/`MaxTime`, default `--gres`, etc.). Set `sbatch_options` to a map
 of SLURM directive names (without the leading `--`) to forward them verbatim to
-the submitted job's `#SBATCH` lines — most commonly `time`, but any directive
-works (`gres`, `qos`, `account`, `constraint`, `nodelist`, …).
+the submitted job's `#SBATCH` lines — most commonly `time`, but also `qos`,
+`account`, `constraint`, `nodelist`, and similar scheduling directives.
 
 ```yaml
-# build.yaml — cap a step at four hours and request two GPUs
+# build.yaml — cap a step at four hours on a named QOS/account
 steps:
   - step_uri: space://steps/command
     config:
       launcher_config:
         sbatch_options:
-          time: "4:00:00"     # -> #SBATCH --time=4:00:00
-          gres: "gpu:2"       # -> #SBATCH --gres=gpu:2
+          time: "4:00:00"       # -> #SBATCH --time=4:00:00
+          qos: high             # -> #SBATCH --qos=high
+          account: my-project   # -> #SBATCH --account=my-project
 ```
 
 Values use SLURM's own formats — e.g. `time` accepts bare minutes (`240`),
 `MM:SS`, `HH:MM:SS` (`"4:00:00"`), or `D-HH:MM:SS` (`"7-00:00:00"`).
+
+> **Some directives are managed by SkyPilot and silently dropped from
+> `sbatch_options`.** SkyPilot generates a set of `#SBATCH` lines itself from the
+> provisioned resources and **removes** those keys from `sbatch_options` (logging
+> a warning only into the provisioning log, not the build output). Setting them
+> here is a no-op — a value like `gres: "gpu:2"` never reaches SLURM and the step
+> can land on a CPU-only allocation while the build still reports success. Use
+> the first-class field instead:
+>
+> | Protected key (dropped) | Set this instead |
+> |---|---|
+> | `gres` | `launcher_config.resources.accelerators` (e.g. `"H100:2"` → `--gres=gpu:H100:2`; bare `"2"` → `--gres=gpu:2`) |
+> | `cpus-per-task` | `compute_config.num_cpus_per_node`, or `resources.cpus` |
+> | `mem` | `resources.memory` (the `compute_config.total_memory_per_node` floor is intentionally skipped on slurm/lsf, so set an explicit `resources.memory`) |
+> | `partition` | the `infra` string / `zone` (`"slurm/<cluster>/<partition>"`) — see [`cluster` / `zone`](#cluster--zone) |
+> | `nodes` | `compute_config.num_nodes` |
+>
+> `job-name`, `output`, and `error` are likewise SkyPilot-managed. Confirmed to
+> pass through unchanged: `time`, `qos`, `account`, `constraint`, `nodelist`.
 
 It resolves per step, merged **per key** (highest precedence last), so a step can
 override one directive while inheriting the rest:
