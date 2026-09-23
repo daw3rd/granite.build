@@ -91,6 +91,14 @@ Each key under `steps:` is a **step-type slug** — the *last path segment* of t
 `command`, and so on. Its value is a small map of top-level `config` keys applied only to steps of that
 type.
 
+> **Slugs resolve within this environment.** A slug names a step type **relative to the environment
+> this `environment.yaml` belongs to** — it is not a global identifier. The same last-path-segment
+> slug can name different step implementations in different environment families (e.g. `hfpull`
+> exists under `builtins/steps/{k8s,lsf,skypilot}/`, and step names such as `hello`/`sage-eval` recur
+> across families). Because `config.steps` is scoped to one environment, such reuse is unambiguous
+> here: a slug matches only the step of that type resolved for *this* environment, so a multi-backend
+> space's like-named steps in other environments are never affected by this map.
+
 ```yaml
 config:
   cluster: slurm-docker
