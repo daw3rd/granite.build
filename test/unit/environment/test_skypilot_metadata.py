@@ -94,6 +94,18 @@ def test_comment_has_no_newline():
     assert "target=line_one_line_two" in comment
 
 
+def test_comment_delimiters_neutralized_in_values():
+    """A value containing ';' or '=' can't forge or truncate comment fields."""
+    run_metadata = {"build_config_name": "a;target=evil", "build_id": "b1"}
+    comment = task_metadata_comment(run_metadata)
+    # The injected "target=evil" must NOT survive as a parseable extra field:
+    # ';' -> ',' and '=' -> '-' keep the value in its own slot.
+    assert comment == "build_id=b1;build_name=a,target-evil"
+    # Exactly the two real fields remain when splitting on the delimiters.
+    keys = [pair.split("=", 1)[0] for pair in comment.split(";")]
+    assert keys == ["build_id", "build_name"]
+
+
 def test_label_value_truncated_to_63_chars():
     """Long values are slugified and capped at the k8s label limit."""
     run_metadata = {"target_name": "x" * 100}

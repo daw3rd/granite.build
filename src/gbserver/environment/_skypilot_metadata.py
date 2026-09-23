@@ -91,20 +91,31 @@ def _label_value(value: str) -> str:
 
 
 def _comment_value(value: str) -> str:
-    """Coerce a raw value into a single whitespace-free comment token.
+    """Coerce a raw value into a single delimiter-safe comment token.
 
-    SkyPilot emits the SLURM comment unquoted (``--comment=<value>``), so any
-    whitespace would split the directive, and newlines are rejected by
-    SkyPilot's schema. Internal ``:``/``/`` are preserved so a full step uri
-    (e.g. ``space://steps/foo``) survives intact.
+    Two hazards are neutralized so a value can never break out of its slot in
+    the ``key=value;key=value`` comment:
+
+    * **Whitespace/newlines** are collapsed to ``_``. SkyPilot emits the SLURM
+      comment unquoted (``--comment=<value>``), so whitespace would split the
+      directive and newlines are rejected by SkyPilot's schema.
+    * **The structural delimiters ``;`` and ``=``** are replaced (``;`` -> ``,``,
+      ``=`` -> ``-``). Otherwise a free-form value like ``a;target=evil`` would
+      render as ``build_name=a;target=evil``, and a ``;``-splitting consumer
+      would parse ``target=evil`` as a fabricated extra field (and lose the
+      original value).
+
+    Internal ``:``/``/`` are preserved so a full step uri (e.g.
+    ``space://steps/foo``) survives intact.
 
     Args:
         value: The raw field value.
 
     Returns:
-        The value with each run of whitespace replaced by ``_``.
+        The value with whitespace collapsed to ``_`` and ``;``/``=`` replaced.
     """
-    return re.sub(r"\s+", "_", value)
+    collapsed = re.sub(r"\s+", "_", value)
+    return collapsed.replace(";", ",").replace("=", "-")
 
 
 def task_metadata_labels(run_metadata: Mapping) -> Dict[str, str]:
