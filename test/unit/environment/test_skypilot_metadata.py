@@ -23,6 +23,7 @@ Exercises the pure helpers in ``_skypilot_metadata`` that turn a step's
 
 from gbserver.environment._skypilot_metadata import (
     apply_slurm_comment_override,
+    normalize_run_metadata,
     task_metadata_comment,
     task_metadata_labels,
 )
@@ -136,3 +137,25 @@ def test_apply_slurm_comment_override_noop_when_empty():
     overrides: dict = {}
     apply_slurm_comment_override(overrides, {})
     assert overrides == {}
+
+
+def test_normalize_run_metadata_passthrough_dict():
+    """A dict is returned unchanged (same object)."""
+    run_metadata = {"build_id": "b1"}
+    assert normalize_run_metadata(run_metadata) is run_metadata
+
+
+def test_normalize_run_metadata_calls_to_dict():
+    """A non-dict object with to_dict() is converted via it."""
+
+    class _Meta:
+        def to_dict(self):
+            return {"build_id": "b1"}
+
+    assert normalize_run_metadata(_Meta()) == {"build_id": "b1"}
+
+
+def test_normalize_run_metadata_none_and_other_yield_empty():
+    """None (or anything without to_dict) normalizes to an empty dict."""
+    assert normalize_run_metadata(None) == {}
+    assert normalize_run_metadata("nope") == {}

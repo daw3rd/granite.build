@@ -26,10 +26,31 @@ operator config and is out of scope here.
 
 import re
 from dataclasses import dataclass
-from typing import Dict, Mapping
+from typing import Any, Dict, Mapping
 
 # Maximum length of a Kubernetes label value (also within cloud tag limits).
 _MAX_LABEL_VALUE_LEN = 63
+
+
+def normalize_run_metadata(run_metadata: Any) -> Dict:
+    """Coerce a launcher's ``run_metadata`` kwarg into a plain dict.
+
+    The codebase passes ``run_metadata`` as either a ``dict`` or an
+    ``EntityRunMetadata`` object, so both SkyPilot launchers normalize it before
+    use. Shared here to keep that logic in one place.
+
+    Args:
+        run_metadata: The raw value (dict, EntityRunMetadata, ``None``, or other).
+
+    Returns:
+        The value unchanged if it is already a dict; its ``to_dict()`` result if
+        it exposes one; otherwise ``{}`` (also for ``None``).
+    """
+    if isinstance(run_metadata, dict):
+        return run_metadata
+    if hasattr(run_metadata, "to_dict"):
+        return run_metadata.to_dict()
+    return {}
 
 
 @dataclass(frozen=True)

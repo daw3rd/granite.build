@@ -687,6 +687,7 @@ def _is_interactive_auth_stdin_failure(exc: BaseException) -> bool:
 
 from gbserver.environment._skypilot_metadata import (
     apply_slurm_comment_override,
+    normalize_run_metadata,
     task_metadata_labels,
 )
 from gbserver.environment._skypilot_ssh import (
@@ -1631,13 +1632,9 @@ class Skypilot(Environment):
             config = kwargs.get("config", {}) or {}
 
             attempt = self._relaunch_attempts.get(launch_id, 0)
-            run_metadata = kwargs.get("run_metadata") or {}
-            # run_metadata is normally a dict here; tolerate an
-            # EntityRunMetadata object defensively (codebase passes both shapes).
-            if not isinstance(run_metadata, dict):
-                run_metadata = (
-                    run_metadata.to_dict() if hasattr(run_metadata, "to_dict") else {}
-                )
+            # run_metadata is normally a dict here, but the codebase also passes
+            # an EntityRunMetadata object; normalize to a plain dict.
+            run_metadata = normalize_run_metadata(kwargs.get("run_metadata"))
             cluster_name = self._cluster_name_for(
                 launch_id,
                 attempt,

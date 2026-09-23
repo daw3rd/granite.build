@@ -52,6 +52,7 @@ def _download_logs_with_retry(cluster_name: str, job_name: str):
 
 from gbserver.environment._skypilot_metadata import (
     apply_slurm_comment_override,
+    normalize_run_metadata,
     task_metadata_labels,
 )
 from gbserver.environment._skypilot_ssh import (
@@ -162,14 +163,8 @@ class Skypilot_managed(Environment):
             launcher_config = kwargs.get("launcher_config", {}) or {}
             config = kwargs.get("config", {}) or {}
             # Kept as a local: reused by the post-launch-failure event below.
-            run_metadata = kwargs.get("run_metadata", {})
-            # run_metadata is normally a dict here; tolerate an
-            # EntityRunMetadata object defensively (codebase passes both shapes),
-            # mirroring the unmanaged launcher.
-            if not isinstance(run_metadata, dict):
-                run_metadata = (
-                    run_metadata.to_dict() if hasattr(run_metadata, "to_dict") else {}
-                )
+            # Normalize to a plain dict (codebase passes dict or EntityRunMetadata).
+            run_metadata = normalize_run_metadata(kwargs.get("run_metadata"))
 
             job_name = self._job_name_for(launch_id)
             cloud = (
