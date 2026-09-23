@@ -212,8 +212,13 @@ environment_configs:
 
           # ---- sky config overrides (SkyPilot's task-level `config:`) ----
           docker:                 # Optional. Deep-merged into sky.Resources._cluster_config_overrides.
-            run_options:          # Only the `docker` section is passed through per-step; other SkyPilot
-              - "--shm-size=8g"   # config sections belong in the env-level `cloud_config` block.
+            run_options:          # The `docker` and (SLURM-only) `sbatch_options` sections are passed
+              - "--shm-size=8g"   # through per-step; other SkyPilot config belongs in env `cloud_config`.
+          sbatch_options:         # Optional, SLURM-only. #SBATCH directives (no `--`), forwarded verbatim.
+            time: "4:00:00"       # e.g. --time=4:00:00, --qos=high. No-op on aws/k8s/lsf (WARNING).
+            qos: high             # NOTE: SkyPilot-managed keys (gres, mem, cpus-per-task, partition,
+                                  # nodes, ...) are silently dropped — use resources.accelerators etc.
+                                  # See skypilot-slurm.md#sbatch_options--slurm-sbatch-directives.
 
           # ---- sky.Task ----
           setup: |                # Optional. Run once at cluster bring-up (cached across reuse).
@@ -306,14 +311,22 @@ cloud-agnostic steps leave `resources` empty and let the build.yaml supply them.
 
 > `compute_config` is **not** read by this launcher (unlike K8s/LSF) — see the dedicated note below.
 
-#### `config` overrides (`docker`)
+#### `config` overrides (`docker`, `sbatch_options`)
 
 SkyPilot tasks accept a top-level `config:` block that overrides `~/.sky/config.yaml` per request; on
-`sky.Resources` this is `_cluster_config_overrides`. gbserver exposes **only the `docker` section** of
-it, as a launcher-level `docker:` key — e.g. `docker.run_options` to pass extra `docker run` flags
-(`--shm-size`, `--gpus`, `--ipc=host`). It merges `launcher_config.docker` with
-`config.launcher_config.docker` (build.yaml wins). Broader SkyPilot config (kubernetes, aws, nvidia,
-etc.) is not per-step — set it once at the env level via `cloud_config` (see "Inline config").
+`sky.Resources` this is `_cluster_config_overrides`. gbserver exposes two sections of it per step:
+
+- **`docker`** — a launcher-level `docker:` key — e.g. `docker.run_options` to pass extra `docker run`
+  flags (`--shm-size`, `--gpus`, `--ipc=host`). It merges `launcher_config.docker` with
+  `config.launcher_config.docker` (build.yaml wins).
+- **`sbatch_options`** (**SLURM-only**) — a map of SLURM `#SBATCH` directive names (no `--`) forwarded
+  verbatim to the job (`time`, `gres`, `qos`, `account`, …). Merged **per key** across env
+  (`environment.yaml` `config.sbatch_options`) → step.yaml → build.yaml (highest last). A no-op on
+  aws/kubernetes/lsf (a WARNING is logged). See
+  [skypilot-slurm.md](skypilot-slurm.md#sbatch_options--slurm-sbatch-directives).
+
+Broader SkyPilot config (kubernetes, aws, nvidia, etc.) is not per-step — set it once at the env level
+via `cloud_config` (see "Inline config").
 
 #### `file_mounts`
 
