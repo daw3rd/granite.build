@@ -7,47 +7,29 @@ including the SLURM-only gating (a no-op WARNING on other clouds) and
 coexistence with a ``docker`` override.
 """
 
-import asyncio
 import logging
-from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Shared launch-mock scaffolding (see test_skypilot_slurm.py, which uses the
+# same helpers) lives in libgbtest so it doesn't drift across test files.
+from libgbtest.environments.skypilot_mocks import _launch_and_get_resources, _make_env
+
 from gbserver.environment.skypilot import Skypilot
-from gbserver.types.environmentconfig import EnvironmentConfig
-
-
-def _mock_sky():
-    """Build a MagicMock standing in for the ``sky`` module during a launch."""
-    mock = MagicMock()
-    mock.Resources = MagicMock(return_value=MagicMock())
-    mock.Task = MagicMock(return_value=MagicMock())
-    mock.launch = MagicMock(return_value="req-sbatch")
-    mock.stream_and_get = MagicMock(return_value=(1, MagicMock()))
-    return mock
-
-
-def _make_env(config: dict) -> Skypilot:
-    """Build a Skypilot environment from a raw environment.yaml ``config`` dict."""
-    return Skypilot(
-        event_q=asyncio.Queue(),
-        environment_config=EnvironmentConfig(
-            name="test-sbatch", type="Skypilot", config=config
-        ),
-    )
 
 
 async def _overrides_for(env: Skypilot, launch_id: str, **launch_kwargs):
-    """Launch under a mocked ``sky`` and return the ``_cluster_config_overrides``
-    kwarg passed to ``sky.Resources`` (``None`` when no overrides applied)."""
-    mock_sky = _mock_sky()
-    with (
-        patch("gbserver.environment.skypilot.sky", mock_sky),
-        patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
-    ):
-        env._get_launch_ready_event(launch_id)
-        await env.launch_skypilot(launch_id=launch_id, **launch_kwargs)
-    return mock_sky.Resources.call_args[1]["_cluster_config_overrides"]
+    """Launch under a mocked ``sky`` and return just the
+    ``_cluster_config_overrides`` kwarg passed to ``sky.Resources`` (``None``
+    when no overrides applied).
+
+    :param env: the Skypilot environment under test.
+    :param launch_id: unique id for this launch (arms the ready event).
+    :param launch_kwargs: forwarded to ``launch_skypilot``.
+    :returns: the ``_cluster_config_overrides`` value, or ``None``.
+    """
+    kwargs = await _launch_and_get_resources(env, launch_id, **launch_kwargs)
+    return kwargs["_cluster_config_overrides"]
 
 
 # ---------------------------------------------------------------------------
