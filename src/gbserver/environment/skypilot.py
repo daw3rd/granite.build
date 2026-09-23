@@ -1897,7 +1897,8 @@ class Skypilot(Environment):
             # GB_BUILD_WORKDIR (inside get_launch_env_vars) and also used below
             # as the initial CWD of the run script and the remap target for
             # relative file_mounts, so it is computed here as a local.
-            run_metadata = kwargs.get("run_metadata", {})
+            # (run_metadata is intentionally NOT re-read here: the normalized
+            # dict from the top of the method stays in effect through this call.)
             build_workdir = (
                 kwargs.get("setup_config", {}).get("skypilot", {}).get("build_workdir")
             )
