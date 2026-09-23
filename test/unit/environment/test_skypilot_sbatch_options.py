@@ -134,6 +134,8 @@ class TestSbatchOptionsLaunch:
 
     @pytest.mark.asyncio
     async def test_non_slurm_cloud_is_noop_and_warns(self, caplog):
+        # Explicitly set on the (non-SLURM) step -> WARNING, so the author knows
+        # the field they just wrote is ignored.
         env = _make_env({"default_cloud": "kubernetes"})
         with caplog.at_level(logging.WARNING):
             overrides = await _overrides_for(
@@ -149,6 +151,24 @@ class TestSbatchOptionsLaunch:
         # No per-task channel off SLURM: the field is a documented no-op.
         assert overrides is None
         assert any("not SLURM" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_non_slurm_inherited_env_default_does_not_warn(self, caplog):
+        # An env-wide default on a non-SLURM step the author never touched is a
+        # passive no-op: DEBUG, not WARNING (otherwise every k8s/aws step of a
+        # SLURM-default env would nag).
+        env = _make_env(
+            {"default_cloud": "kubernetes", "sbatch_options": {"qos": "normal"}}
+        )
+        with caplog.at_level(logging.WARNING):
+            overrides = await _overrides_for(
+                env,
+                "sb-inherit",
+                launcher_config={"run": "hostname", "resources": {}},
+                config={},
+            )
+        assert overrides is None
+        assert not any("not SLURM" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_no_overrides_when_nothing_set(self):

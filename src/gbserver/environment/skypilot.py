@@ -1139,9 +1139,32 @@ class Skypilot(Environment):
         # ``sbatch_options:`` / ``launcher_config:`` YAML key resolves to an
         # empty map rather than crashing the merge with a ``None`` operand
         # (matches the ``or {}`` guarding used elsewhere in this module).
-        env_cfg = self.config.config if self.config else {}
+        env_default = self.config.config.get("sbatch_options") if self.config else None
         return {
-            **(env_cfg.get("sbatch_options") or {}),
+            **(env_default or {}),
+            **self._step_sbatch_options(launcher_config, config),
+        }
+
+    @staticmethod
+    def _step_sbatch_options(
+        launcher_config: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """The per-step ``sbatch_options``, excluding the env-level default.
+
+        This is the step.yaml ``launcher_config`` layer merged under the
+        build.yaml ``config.launcher_config`` layer (build wins per key). It is
+        the portion the build author set **on this step** — as opposed to the
+        env-wide default folded in by :meth:`_resolve_sbatch_options` — so the
+        launch site can tell an explicit per-step value from a passively
+        inherited one (which governs the non-SLURM log level).
+
+        :param launcher_config: the step.yaml ``launcher_config`` block.
+        :param config: the build.yaml step ``config`` dict.
+        :returns: the merged per-step ``sbatch_options`` map, empty when neither
+            the step nor the build layer sets it.
+        """
+        return {
             **(launcher_config.get("sbatch_options") or {}),
             **((config.get("launcher_config") or {}).get("sbatch_options") or {}),
         }
@@ -1780,7 +1803,16 @@ class Skypilot(Environment):
                         },
                     }
                 else:
-                    logger.warning(
+                    # Warn only when the step/build explicitly set sbatch_options
+                    # on this (non-SLURM) step. A value inherited solely from the
+                    # env-wide default is a passive no-op here — the build author
+                    # didn't touch it on this step — so log it at DEBUG rather
+                    # than nagging on every non-SLURM step of a SLURM-default env.
+                    explicitly_set = bool(
+                        self._step_sbatch_options(launcher_config, config)
+                    )
+                    log = logger.warning if explicitly_set else logger.debug
+                    log(
                         "sbatch_options is set but cloud %r is not SLURM; "
                         "ignoring it.",
                         cloud_group,
