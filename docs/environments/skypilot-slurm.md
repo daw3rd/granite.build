@@ -164,10 +164,14 @@ Values use SLURM's own formats — e.g. `time` accepts bare minutes (`240`),
 > | `cpus-per-task` | `compute_config.num_cpus_per_node`, or `resources.cpus` |
 > | `mem` | `resources.memory` (the `compute_config.total_memory_per_node` floor is intentionally skipped on slurm/lsf, so set an explicit `resources.memory`) |
 > | `partition` | the `infra` string / `zone` (`"slurm/<cluster>/<partition>"`) — see [`cluster` / `zone`](#cluster--zone) |
-> | `nodes` | `compute_config.num_nodes` |
+> | `nodes` | *(not plumbed through the SkyPilot launcher — see below)* |
 >
-> `job-name`, `output`, and `error` are likewise SkyPilot-managed. Confirmed to
-> pass through unchanged: `time`, `qos`, `account`, `constraint`, `nodelist`.
+> `nodes`, `job-name`, `output`, and `error` are likewise SkyPilot-managed.
+> Multi-node is **not** driven from the step config on this launcher: SkyPilot's
+> `--nodes` comes from its own provisioner node count, and the SkyPilot launcher
+> does not read `compute_config.num_nodes` (that field is honored only by the
+> native k8s/LSF gbstep paths). Confirmed to pass through unchanged: `time`,
+> `qos`, `account`, `constraint`, `nodelist`.
 
 It resolves per step, merged **per key** (highest precedence last), so a step can
 override one directive while inheriting the rest:
