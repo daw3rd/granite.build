@@ -74,13 +74,17 @@ render() {
 
 main() {
   local comment
-  if [ -t 0 ]; then
-    # No stdin: require a job id argument.
+  # Prefer an explicit job id argument over stdin: a redirected fd 0 (cron, CI,
+  # a wrapping script) is not a tty, so keying on the arg first keeps
+  # `gbmeta.sh <jobid>` working regardless of what stdin happens to be.
+  if [ "$#" -ge 1 ]; then
     [ "$#" -eq 1 ] || usage
     comment="$(fetch_comment "$1")"
-  else
-    # Comment (or a line containing it) is piped in.
+  elif [ ! -t 0 ]; then
+    # No arg, but a comment (or a line containing it) is piped in.
     comment="$(cat)"
+  else
+    usage
   fi
   render "$comment" || { echo "no granite.build metadata found" >&2; exit 1; }
 }
