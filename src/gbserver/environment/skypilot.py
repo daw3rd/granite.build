@@ -685,6 +685,10 @@ def _is_interactive_auth_stdin_failure(exc: BaseException) -> bool:
     return False
 
 
+from gbserver.environment._skypilot_metadata import (
+    apply_slurm_comment_override,
+    task_metadata_labels,
+)
 from gbserver.environment._skypilot_ssh import (
     execute_on_host_via_ssh as _execute_on_host_via_ssh,
 )
@@ -1726,6 +1730,11 @@ class Skypilot(Environment):
             if docker_config:
                 cluster_config_overrides["docker"] = docker_config
 
+            # Attach build-tracking metadata as a SLURM --comment (searchable via
+            # sjob/squeue/sacct). Safe to set unconditionally: only the SLURM
+            # backend reads it; the slurm section is inert on k8s/cloud/LSF.
+            apply_slurm_comment_override(cluster_config_overrides, run_metadata)
+
             # Trailing `or None` maps an empty image_id to None: the merged
             # `command` step renders image_id to "" when no image is given, and
             # sky.Resources expects None (bare node) rather than an empty string.
@@ -1752,6 +1761,9 @@ class Skypilot(Environment):
                 use_spot=res_config.get("use_spot"),
                 zone=zone,
                 image_id=image_id,
+                # Build-tracking labels. SkyPilot applies these on k8s (pod
+                # labels) and cloud (instance tags); ignored on SLURM/LSF.
+                labels=task_metadata_labels(run_metadata) or None,
                 _cluster_config_overrides=cluster_config_overrides or None,
             )
 
