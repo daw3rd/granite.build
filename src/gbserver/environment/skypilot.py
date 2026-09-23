@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import functools
 import glob
+import json
 import os
 import re
 import shlex
@@ -1955,14 +1956,6 @@ class Skypilot(Environment):
             if docker_config:
                 cluster_config_overrides["docker"] = docker_config
 
-            logger.info(
-                "SkyPilot resources: accelerators=%s, image_id=%s, "
-                "cluster_config_overrides=%s",
-                res_config.get("accelerators"),
-                image_id,
-                cluster_config_overrides or None,
-            )
-
             resources = sky.Resources(
                 infra=infra,
                 accelerators=res_config.get("accelerators"),
@@ -1974,6 +1967,30 @@ class Skypilot(Environment):
                 zone=zone,
                 image_id=image_id,
                 _cluster_config_overrides=cluster_config_overrides or None,
+            )
+
+            # Diagnostic only: sky.Resources.__dict__ holds Cloud objects that
+            # aren't JSON serializable; to_yaml_config() returns a plain dict
+            # (with infra encoding cloud/region/zone), and the accessors expose
+            # the resolved cloud/region/zone directly. Both the accessors and
+            # the serialization are evaluated eagerly as logging args (before
+            # any level check), so a raise here would turn a good provision into
+            # a launch-time crash — guard the whole description build and fall
+            # back to a marker rather than propagate.
+            try:
+                resources_desc = (
+                    f"cloud={resources.cloud} region={resources.region}"
+                    f" zone={resources.zone} config={json.dumps(resources.to_yaml_config())}"
+                )
+            except Exception as resource_log_err:  # pylint: disable=broad-except
+                resources_desc = f"<unavailable: {resource_log_err!r}>"
+            logger.info(
+                "SkyPilot launching task with resources: %s accelerators=%s,"
+                " image_id=%s, cluster_config_overrides=%s",
+                resources_desc,
+                res_config.get("accelerators"),
+                image_id,
+                cluster_config_overrides or None,
             )
 
             # Per-run workdir provisioned by setup_skypilot. Exported as
