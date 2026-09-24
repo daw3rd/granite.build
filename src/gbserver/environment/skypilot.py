@@ -2257,9 +2257,17 @@ class Skypilot(Environment):
                 if isinstance(bval, dict) and "_hfpull" in bval:
                     pending_hfpulls[bid] = bval["_hfpull"]
             if pending_hfpulls:
+                # Pin <2.0: huggingface_hub 2.x pulls httpx2, whose BrotliDecoder
+                # calls brotli.Decompressor.process(output_buffer_limit=...) -- a
+                # kwarg added only in brotli>=1.2.0. The bare worker's ambient
+                # conda brotli (1.0.9) rejects it (TypeError), failing hf download.
+                # NOT a Python-version issue (reproduces on py3.12 w/ brotli<1.2).
+                # Stop-gap until the worker ships brotli>=1.2.0 (or httpx2[brotli])
+                # so hf 2.x works; see follow-up issue.
                 hfpull_lines = [
                     "# -- gbserver: inline hfpull for inputs --",
-                    "pip install --no-cache-dir 'huggingface_hub[cli]' 2>/dev/null || true",
+                    "pip install --no-cache-dir 'huggingface_hub[cli]<2.0' "
+                    "2>/dev/null || true",
                 ]
                 for bid, pull_info in pending_hfpulls.items():
                     cmd = f'hf download "{pull_info["repo"]}" --local-dir "{pull_info["path"]}"'
