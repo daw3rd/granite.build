@@ -55,6 +55,7 @@ from gbserver.spaces.hf_push_config import (
 )
 from gbserver.types.buildconfig import BuildTargetStepConfig
 from gbserver.types.buildevent import EntityRunMetadata
+from gbserver.types.constants import GBSERVER_LOG_RECORD_MAX_CHARS
 from gbserver.types.environment.environment import EnvironmentVariableConfig
 from gbserver.types.environment.skypilot import StepSkypilotConfig
 from gbserver.types.environmentconfig import EnvironmentConfig
@@ -669,12 +670,6 @@ _NON_TRANSIENT_PROVISION_SUBSTRINGS = (
 )
 
 
-# Cap for the server traceback emitted as one log record (mirrors
-# build/run.py _TRACE_LOG_MAX_CHARS; kept local to avoid importing build.run
-# into an environment module).
-_REMOTE_TRACE_LOG_MAX_CHARS = 20000
-
-
 def _log_remote_stacktrace(exc: BaseException, context: str) -> None:
     """Log the SkyPilot API server's traceback for ``exc``, when it carries one.
 
@@ -695,7 +690,7 @@ def _log_remote_stacktrace(exc: BaseException, context: str) -> None:
     logger.error(
         "Traceback from the SkyPilot API server (%s): %s",
         context,
-        escape_for_one_record(stacktrace, _REMOTE_TRACE_LOG_MAX_CHARS),
+        escape_for_one_record(stacktrace, GBSERVER_LOG_RECORD_MAX_CHARS),
     )
 
 
@@ -1267,19 +1262,35 @@ class Skypilot(Environment):
         An ``echo``, not a slurm command: tests SSH only, adds no scheduler load.
 
         Best-effort — a failure warns and the launch proceeds, so a probe-only quirk
-        can't block a good launch; the retry classifier is the real backstop. Set
-        ``GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S=0`` to skip.
+        can't block a good launch; the retry classifier is the real backstop.
+
+        ``GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S=0`` skips it, and logs that it did.
+        Worth skipping where SSH slots are scarce: the probe holds one for up to
+        ``timeout``, starving the control connection SkyPilot opens next.
 
         :param cloud_group: Normalized target cloud (``"slurm"``/``"lsf"``).
         :param cluster: Cluster name — the ``Host`` alias in ``~/.<cloud>/config``.
         """
         from gbserver.types.constants import (
             ENABLE_SSH_HOST_KEY_VERIFICATION,
+            ENV_VAR_SKYPILOT_SSH_PROBE_TIMEOUT_S,
             GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S,
         )
 
         timeout = GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S
-        if cloud_group not in _SSH_HPC_CLOUDS or not cluster or timeout <= 0:
+        if cloud_group not in _SSH_HPC_CLOUDS or not cluster:
+            return
+        if timeout <= 0:
+            # After the cloud guard, so every k8s/aws launch stays quiet. Logged, not
+            # silent: otherwise a missing probe line reads as code that never ran.
+            logger.info(
+                "SSH probe disabled (%s=%s); skipping the %s login node %s "
+                "pre-launch probe",
+                ENV_VAR_SKYPILOT_SSH_PROBE_TIMEOUT_S,
+                timeout,
+                cloud_group,
+                cluster,
+            )
             return
         # Reuse SkyPilot's own SSH config so the probe follows the same
         # alias/user/key/ProxyCommand directives the launch will.
