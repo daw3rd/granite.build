@@ -156,7 +156,9 @@ class AtomicApiClient:
                 logger.info("Default SSL verification: %s", cfg.verify_ssl)
                 # verify_ssl expects a plain bool; fall back to the secure
                 # default (True) when the caller leaves it unset (None).
-                cfg.verify_ssl = ssl_verification if ssl_verification is not None else True
+                cfg.verify_ssl = (
+                    ssl_verification if ssl_verification is not None else True
+                )
                 logger.info(
                     "SSL verification from environment.yaml: %s", cfg.verify_ssl
                 )
