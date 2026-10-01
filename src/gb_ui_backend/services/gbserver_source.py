@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -186,7 +186,7 @@ class GbserverSource:
             LIMIT :limit
         """)
         has_archive_column = True
-        rows = []
+        rows: Sequence[Any] = []
         async with self._sessions() as session:
             try:
                 result = await session.execute(sql_with_archive, params)
@@ -368,7 +368,7 @@ class GbserverSource:
                 updated_time,
                 archive,
             ) = row
-            yaml_content: Optional[str] = None
+            yaml_content = None
             if archive:
                 try:
                     raw = (

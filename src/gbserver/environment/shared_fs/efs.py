@@ -33,6 +33,7 @@ class EfsProvider(SharedFilesystemProvider):
     def _mount_line(self, mp_quoted: str) -> str:
         # Validation guarantees a derivable DNS name (fsid+region or dns_name).
         dns = self.cfg.derived_dns_name()
+        assert dns is not None, "config validation guarantees a derivable DNS name"
         tls = " -o tls" if self.cfg.tls else ""
         fsid = self.cfg.file_system_id
         efs_cmd = (

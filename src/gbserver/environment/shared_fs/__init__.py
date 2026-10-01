@@ -32,4 +32,6 @@ def build_provider(
     if not sf_raw:
         return None
     sf = SharedFilesystemConfig.model_validate(sf_raw)
+    # The model validator guarantees an 'efs' block for the 'efs' provider.
+    assert sf.efs is not None, "provider 'efs' requires an 'efs' block"
     return EfsProvider(sf.mount_point, sf.efs)

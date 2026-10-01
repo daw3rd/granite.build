@@ -428,7 +428,9 @@ class Skypilot_managed(Environment):
                 jobs = sky.get(request_id)
 
                 status = None
-                if jobs:
+                # sky.get() is typed as a broad union; the jobs-queue result is
+                # a list of job records. Narrow to that before iterating.
+                if isinstance(jobs, list):
                     for job in jobs:
                         if job.get("name") == job_name:
                             status = job.get("status")

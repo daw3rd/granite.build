@@ -39,8 +39,10 @@ class CloudLogsClient:
         client = self._get_http()
         resp = await client.post(
             "https://iam.cloud.ibm.com/identity/token",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data=f"grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey={self.api_key}",
+            data={
+                "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
+                "apikey": self.api_key,
+            },
             timeout=60.0,
         )
         resp.raise_for_status()
