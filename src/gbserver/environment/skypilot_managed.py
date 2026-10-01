@@ -428,14 +428,18 @@ class Skypilot_managed(Environment):
                 jobs = sky.get(request_id)
 
                 status = None
-                # sky.get() is typed as a broad union; the jobs-queue result is
-                # a list of job records. Narrow to that before iterating.
-                if isinstance(jobs, list):
-                    for job in jobs:
-                        if job.get("name") == job_name:
-                            status = job.get("status")
-                            cluster_name = job.get("cluster_name")
-                            break
+                # sky.jobs.queue (v1, our call) returns a List[ManagedJobRecord],
+                # but its declared type also allows the v2 tuple form
+                # (records, total, status_counts, ...) where the records are
+                # element 0. Normalize to the record list either way so a tuple
+                # return doesn't skip status detection (and doesn't iterate the
+                # metadata tuple).
+                job_records = jobs[0] if isinstance(jobs, tuple) else jobs
+                for job in job_records:
+                    if job.get("name") == job_name:
+                        status = job.get("status")
+                        cluster_name = job.get("cluster_name")
+                        break
 
                 if status != last_status:
                     logger.info(
