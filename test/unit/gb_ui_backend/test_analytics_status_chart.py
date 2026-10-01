@@ -77,9 +77,7 @@ async def app_and_client():
     # schema creation, seeding, and every per-request session share one in-memory
     # database. Without it each :memory: connection is a distinct DB and the test
     # only passes by the accident of the default pool reusing the same connection.
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:", poolclass=StaticPool
-    )
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
