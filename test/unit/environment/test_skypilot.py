@@ -1910,26 +1910,110 @@ class TestInlineConfigMaterialization:
             # and aws are forwarded.
             assert args[1] is None and args[2] == {"lsf": {"q": 1}} and args[3]
 
-    def test_ssh_materialized_per_launch(self):
+    @pytest.mark.asyncio
+    async def test_ssh_materialized_per_launch(self):
         env = self._env(
             {"cluster_ssh_configs": {"slurm": [{"Host": "c", "HostName": "h"}]}}
         )
-        with patch(
-            "gbserver.environment.skypilot_config.materialize_ssh_for_cloud"
-        ) as m:
-            env._materialize_ssh_for_launch("slurm")
-            m.assert_called_once()
-            args = m.call_args.args
-            assert args[0] == "env-inline"  # env name
-            assert args[3] == "slurm"  # only the launched cloud is merged
+        with patch("gbserver.environment.skypilot_config._merge_selected_hosts") as m:
+            rotator = await env._materialize_ssh_for_launch("slurm", "c")
+        m.assert_called_once()
+        args = m.call_args.args
+        assert args[0] == "slurm"  # only the launched cloud is merged
+        assert args[1][0]["HostName"] == "h"  # the chosen scalar host
+        assert args[3] == "env-inline"  # env name
+        assert rotator is not None  # a rotator is always returned for HPC SSH config
 
-    def test_ssh_materialize_noop_without_inline_ssh(self):
+    @pytest.mark.asyncio
+    async def test_ssh_materialize_noop_without_inline_ssh(self):
         env = self._env({"default_cloud": "slurm"})
-        with patch(
-            "gbserver.environment.skypilot_config.materialize_ssh_for_cloud"
-        ) as m:
-            env._materialize_ssh_for_launch("slurm")
-            m.assert_not_called()
+        with patch("gbserver.environment.skypilot_config._merge_selected_hosts") as m:
+            rotator = await env._materialize_ssh_for_launch("slurm", None)
+        m.assert_not_called()
+        assert rotator is None  # nothing to materialize -> no rotator
+
+    @pytest.mark.asyncio
+    async def test_materialize_collapses_hostname_list_to_one_candidate(self):
+        """A list ``HostName`` is written as a single scalar, and the target alias's
+        remaining candidates are retained on the rotator for failover."""
+        env = self._env(
+            {
+                "cluster_ssh_configs": {
+                    "slurm": [{"Host": "c", "HostName": ["h1", "h2", "h3"]}]
+                }
+            }
+        )
+        with patch("gbserver.environment.skypilot_config._merge_selected_hosts") as m:
+            rotator = await env._materialize_ssh_for_launch("slurm", "c")
+        merged = m.call_args.args[1]
+        assert len(merged) == 1  # one Host block
+        assert merged[0]["HostName"] in {"h1", "h2", "h3"}  # collapsed to one scalar
+        # The target alias keeps all candidates so rotate() can fail over.
+        assert rotator is not None
+        assert {c["HostName"] for c in rotator._target_candidates} == {
+            "h1",
+            "h2",
+            "h3",
+        }
+
+    @pytest.mark.asyncio
+    async def test_single_host_bare_infra_gets_failover_pool(self):
+        """A bare infra (``target_alias`` is None) with exactly one declared host
+        adopts that host as the rotation target, so its candidates still fail over."""
+        env = self._env(
+            {
+                "cluster_ssh_configs": {
+                    "slurm": [{"Host": "only", "HostName": ["h1", "h2"]}]
+                }
+            }
+        )
+        with patch("gbserver.environment.skypilot_config._merge_selected_hosts"):
+            rotator = await env._materialize_ssh_for_launch("slurm", None)
+        assert rotator is not None
+        assert {c["HostName"] for c in rotator._target_candidates} == {"h1", "h2"}
+
+    @pytest.mark.asyncio
+    async def test_sticky_hostname_leads_selection(self):
+        """A login node already written for the alias is kept as the launch pick, so a
+        prior failover is not undone by a fresh random choice."""
+        env = self._env(
+            {
+                "cluster_ssh_configs": {
+                    "slurm": [{"Host": "c", "HostName": ["h1", "h2", "h3"]}]
+                }
+            }
+        )
+        with (
+            patch("gbserver.environment.skypilot_config._merge_selected_hosts") as m,
+            patch(
+                "gbserver.environment.skypilot_config._read_managed_hostnames",
+                return_value={"c": "h3"},  # h3 is the node already on disk
+            ),
+        ):
+            rotator = await env._materialize_ssh_for_launch("slurm", "c")
+        assert (
+            m.call_args.args[1][0]["HostName"] == "h3"
+        )  # sticky node kept, not random
+        assert (
+            rotator._target_candidates[0]["HostName"] == "h3"
+        )  # rotation starts there
+
+    @pytest.mark.asyncio
+    async def test_materialize_no_failover_pool_for_unmatched_alias(self):
+        """When the launched alias matches no SSH host, the rotator has nothing to
+        rotate through, so rotate() is a no-op (a true outage surfaces via reraise)."""
+        env = self._env(
+            {
+                "cluster_ssh_configs": {
+                    "slurm": [{"Host": "c", "HostName": ["h1", "h2"]}]
+                }
+            }
+        )
+        with patch("gbserver.environment.skypilot_config._merge_selected_hosts"):
+            rotator = await env._materialize_ssh_for_launch("slurm", "other")
+        assert rotator is not None
+        assert rotator._target_candidates == []
+        assert await rotator.rotate() is False  # no candidates -> cannot fail over
 
     @pytest.mark.asyncio
     async def test_launch_inner_materializes_before_api_start(self):

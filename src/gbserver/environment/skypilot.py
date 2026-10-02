@@ -29,6 +29,7 @@ from typing import (
     List,
     Optional,
     Self,
+    Set,
     Tuple,
     Union,
 )
@@ -42,7 +43,6 @@ from tenacity import (
 )
 
 from gbcommon.uri.uri import URI
-from gbserver.environment._skypilot_ssh import _kill_and_reap
 from gbserver.environment.environment import Environment, EventLogLineParserConfig
 from gbserver.environment.shared_fs import (
     build_provider,
@@ -411,6 +411,7 @@ RETRY_RELAUNCH_TIMEOUT_SECONDS = 1800
 # off. Compared against the normalized first infra segment (lowercased).
 _SSH_HPC_CLOUDS = ("slurm", "lsf")
 
+
 # Clouds whose schedulers don't honor SkyPilot autostop/autodown (see the
 # autostop=None handling in the launch path), so a cluster launched with
 # down=True is never removed and keeps its allocation. teardown_skypilot downs
@@ -637,21 +638,25 @@ def _effective_poll_timeout(
     return poll_interval
 
 
-# Substrings that mark a transient resource-acquisition / provision failure.
-# Conservative: drawn from observed SkyPilot/slurm failover messages. Anything
-# else (auth, image-not-found, NotSupported, config, quota-denied) is treated as
-# fatal and re-raised immediately so a genuine launch failure is never masked.
-_TRANSIENT_PROVISION_SUBSTRINGS = (
+# Resource-acquisition/provision failures that are transient regardless of the SSH
+# control plane: a busy scheduler, a not-yet-released allocation, a partition at
+# capacity. Retried, but NOT a reason to fail over to another login node (the login
+# node is fine — the cluster is full), so login-node failover excludes these.
+_TRANSIENT_RESOURCE_SUBSTRINGS = (
     "failed to provision",  # "Failed to provision all possible launchable resources"
     "failed to acquire resources",  # slurm: "Failed to acquire resources in normal for ..."
     "resources unavailable",
     "in normal for",  # slurm partition acquisition failure tail
-    # HPC control-plane SSH flakiness (slurm/lsf): SkyPilot runs its precheck
-    # commands over an un-retried `ssh` bounded only by ConnectTimeout (TCP leg),
-    # so a slow banner or wedged session fails the launch with exit 255 as a bare
-    # ValueError. A blip on a shared login node, not a bad request — retry.
-    # Only unambiguously-SSH wording belongs here: this tuple is matched on every
-    # cloud. Generic TCP/DNS phrasings live in _TRANSIENT_SSH_ONLY_SUBSTRINGS.
+)
+
+# HPC control-plane SSH flakiness (slurm/lsf): SkyPilot runs its precheck commands
+# over an un-retried `ssh` bounded only by ConnectTimeout (TCP leg), so a slow banner
+# or wedged session fails the launch with exit 255 as a bare ValueError. A blip on a
+# shared login node, not a bad request — retry, AND fail over to another candidate
+# login node (see _is_transient_ssh_error / _LoginNodeRotator). Only unambiguously-SSH
+# wording belongs here: this tuple is matched on every cloud. Generic TCP/DNS
+# phrasings live in _TRANSIENT_SSH_ONLY_SUBSTRINGS.
+_TRANSIENT_SSH_PROVISION_SUBSTRINGS = (
     "banner exchange",  # "Connection timed out during banner exchange"
     "failed to get slurm partitions",
     "failed to get partitions for cluster",
@@ -661,6 +666,15 @@ _TRANSIENT_PROVISION_SUBSTRINGS = (
     # the SSH-only tuple below.
     "kex_exchange_identification",  # ssh key-exchange aborted mid-handshake
     "ssh_exchange_identification",
+)
+
+# Substrings that mark a transient resource-acquisition / provision failure.
+# Conservative: drawn from observed SkyPilot/slurm failover messages. Anything
+# else (auth, image-not-found, NotSupported, config, quota-denied) is treated as
+# fatal and re-raised immediately so a genuine launch failure is never masked. The
+# union of the capacity signatures and the unambiguous SSH ones (both retriable).
+_TRANSIENT_PROVISION_SUBSTRINGS = (
+    _TRANSIENT_RESOURCE_SUBSTRINGS + _TRANSIENT_SSH_PROVISION_SUBSTRINGS
 )
 
 # Generic TCP/DNS failures: retriable on the HPC control-plane SSH path, but the
@@ -774,6 +788,163 @@ def _is_transient_provision_error(
     if cloud_group in _SSH_HPC_CLOUDS:
         return any(s in text for s in _TRANSIENT_SSH_ONLY_SUBSTRINGS)
     return False
+
+
+def _is_transient_ssh_error(exc: BaseException, cloud: Optional[str] = None) -> bool:
+    """Return True if ``exc`` is a transient SSH *control-plane* failure.
+
+    A narrower classifier than :func:`_is_transient_provision_error`: it matches only
+    the login-node SSH signatures (a late banner, a wedged session, a key-exchange
+    reset — plus generic TCP/DNS blips on the HPC path), and deliberately EXCLUDES
+    capacity/resource errors (``_TRANSIENT_RESOURCE_SUBSTRINGS``). Those are retriable
+    but say nothing bad about the login node — the cluster is simply full — so they
+    must not trigger login-node failover. Auth rejections
+    (``_NON_TRANSIENT_PROVISION_SUBSTRINGS``) are excluded and checked first, exactly
+    as in :func:`_is_transient_provision_error`, so a bad key never rotates blindly
+    through every candidate.
+
+    :param exc: The exception raised by the provisioning step.
+    :param cloud: Target cloud (as resolved from the launch infra). Generic TCP/DNS
+        wording counts as an SSH blip only on slurm/lsf; ``None`` restricts to the
+        unambiguous SSH substrings.
+    :returns: True when the failure indicates the current login node is unhealthy and
+        another candidate is worth trying.
+    """
+    text = str(exc).lower()
+    if any(s in text for s in _NON_TRANSIENT_PROVISION_SUBSTRINGS):
+        return False
+    if any(s in text for s in _TRANSIENT_SSH_PROVISION_SUBSTRINGS):
+        return True
+    cloud_group = (cloud or "").strip().split("/", 1)[0].lower()
+    if cloud_group in _SSH_HPC_CLOUDS:
+        return any(s in text for s in _TRANSIENT_SSH_ONLY_SUBSTRINGS)
+    return False
+
+
+class _LoginNodeRotator:
+    """Rotate one HPC cluster's ``HostName`` across its candidate login nodes.
+
+    A cluster's ``cluster_ssh_configs`` entry may list several interchangeable login
+    nodes (see :func:`...skypilot_config._expand_hostname_candidates`). Built per
+    launch, this holds the identity-resolved, per-alias login-node selections for one
+    cloud plus the *target* cluster's ordered (shuffled) candidate list. It
+    materializes the current selection into ``~/.<cloud>/config`` and, on a transient
+    SSH control-plane failure during provisioning (see :func:`_is_transient_ssh_error`),
+    advances the target alias to its next candidate and re-materializes so
+    ``sky.launch`` retries against a different login node. Non-target aliases keep
+    their initial random pick. A single-node (or scalar) target cannot rotate, so a
+    genuine outage still surfaces via the provision retry's ``reraise``.
+    """
+
+    def __init__(
+        self: Self,
+        cloud: str,
+        env_name: str,
+        secrets: Dict[str, str],
+        selected: Dict[str, Dict[str, Any]],
+        target_candidates: List[Dict[str, Any]],
+        candidate_hostnames: Optional[Dict[str, Set[str]]] = None,
+    ) -> None:
+        """Initialize a rotator over pre-resolved per-alias selections.
+
+        :param cloud: The HPC cloud being provisioned (``"slurm"``/``"lsf"``).
+        :param env_name: The environment name (used in merge messages).
+        :param secrets: Secret name -> value mapping for directive resolution.
+        :param selected: ``{alias: host dict}`` — the current single-``HostName`` pick
+            per alias (mutated in place as the target rotates).
+        :param target_candidates: The target alias's ordered candidate host dicts
+            (each a single-``HostName`` copy); empty when there is no rotatable target.
+        :param candidate_hostnames: ``{alias: {candidate HostName, …}}`` for every alias,
+            forwarded to the merge so an interchangeable-login-node overwrite of another
+            environment's block is distinguished from a different-cluster alias reuse.
+        """
+        self._cloud = cloud
+        self._env_name = env_name
+        self._secrets = secrets
+        self._selected = selected
+        self._target_candidates = target_candidates
+        self._candidate_hostnames = candidate_hostnames or {}
+        self._target_idx = 0
+
+    @property
+    def target_hostname(self: Self) -> Optional[str]:
+        """The target alias's currently-selected ``HostName`` (for logging)."""
+        if not self._target_candidates:
+            return None
+        return self._target_candidates[self._target_idx].get("HostName")
+
+    async def materialize(self: Self) -> None:
+        """Render + merge the current per-alias selections into ``~/.<cloud>/config``.
+
+        Off the event loop (local file I/O under a lock).
+
+        :raises SkypilotConfigCollisionError: On a foreign clash, or a differing
+            block owned by another environment (see ``merge_ssh_blocks``).
+        """
+        from gbserver.environment.skypilot_config import _merge_selected_hosts
+
+        await asyncio.to_thread(
+            _merge_selected_hosts,
+            self._cloud,
+            list(self._selected.values()),
+            self._secrets,
+            self._env_name,
+            candidate_hostnames=self._candidate_hostnames,
+        )
+
+    async def rotate(self: Self) -> bool:
+        """Advance the target alias to its next candidate login node and re-merge.
+
+        Round-robins through the target's candidates so repeated SSH failures keep
+        moving to a fresh node. Re-materializes ``~/.<cloud>/config`` on success.
+
+        :returns: True if it advanced to a different node (and re-materialized);
+            False when the target has 0 or 1 candidates (nothing to fail over to).
+        :raises SkypilotConfigCollisionError: Propagated from :meth:`materialize`.
+        """
+        if len(self._target_candidates) <= 1:
+            return False
+        self._target_idx = (self._target_idx + 1) % len(self._target_candidates)
+        chosen = self._target_candidates[self._target_idx]
+        self._selected[str(chosen.get("Host"))] = chosen
+        await self.materialize()
+        return True
+
+
+def _select_login_nodes(
+    hosts: List[Dict[str, Any]],
+    target_alias: Optional[str],
+    on_disk: Dict[str, str],
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]], Dict[str, Set[str]]]:
+    """Pick one login node per alias and collect the target's failover candidates.
+
+    Pure helper for :meth:`Skypilot._materialize_ssh_for_launch`. For each host it
+    expands the scalar/list ``HostName`` into candidate dicts, keeping a login node
+    already written for this build (``on_disk``) in front so a failover another launch
+    applied is **sticky** rather than re-randomized back onto the failed node.
+
+    :param hosts: Identity-resolved host dicts (``HostName`` still scalar-or-list).
+    :param target_alias: The cluster alias being launched, whose candidate order the
+        rotator will cycle; ``None`` / unmatched means no failover pool.
+    :param on_disk: ``{alias: HostName}`` currently in ``~/.<cloud>/config`` (sticky).
+    :returns: ``(selected, target_candidates, candidate_hostnames)`` — the per-alias
+        single pick, the target's ordered candidate dicts, and each alias's full
+        candidate ``HostName`` set (for the merge's cross-env relaxation).
+    """
+    from gbserver.environment.skypilot_config import _expand_hostname_candidates
+
+    selected: Dict[str, Dict[str, Any]] = {}
+    target_candidates: List[Dict[str, Any]] = []
+    candidate_hostnames: Dict[str, Set[str]] = {}
+    for host in hosts:
+        alias = str(host.get("Host"))
+        candidates = _expand_hostname_candidates(host, sticky=on_disk.get(alias))
+        selected[alias] = host if candidates is None else candidates[0]
+        if candidates is not None:
+            candidate_hostnames[alias] = {str(c["HostName"]) for c in candidates}
+            if alias == target_alias:
+                target_candidates = candidates
+    return selected, target_candidates, candidate_hostnames
 
 
 # Path fragment of SkyPilot's client module that drives interactive SSH auth.
@@ -1228,181 +1399,98 @@ class Skypilot(Environment):
             materialize(name, None, cloud_config, aws, self.secrets or {})
         self._inline_configs_done = True
 
-    def _materialize_ssh_for_launch(self: Self, cloud: str) -> None:
+    async def _materialize_ssh_for_launch(
+        self: Self, cloud: str, target_alias: Optional[str]
+    ) -> Optional[_LoginNodeRotator]:
         """Merge this env's inline SSH config for ``cloud`` into ``~/.<cloud>/config``.
 
         Idempotent, owner-aware last-writer-wins (see ``merge_ssh_blocks``): an
         identical block is a no-op, so retry relaunches are free; a differing block
-        owned by this same environment self-heals a re-keyed entry. No-op when the
-        env defines no inline SSH config.
+        owned by this same environment self-heals a re-keyed entry. No-op (returns
+        ``None``) when the env defines no inline SSH config for ``cloud``.
+
+        Resolves any ``IdentityKey`` to a key file, picks one login node per alias
+        (keeping a node already written for this build — see ``_select_login_nodes`` —
+        else at random for load spread), writes the selection, and returns a
+        :class:`_LoginNodeRotator` primed on ``target_alias`` so the launch can fail
+        over to another candidate login node on a transient SSH control-plane error.
+
+        When the infra names no cluster (a bare ``lsf``/``slurm`` infra, so
+        ``target_alias`` is ``None``) but the env declares exactly one host for this
+        cloud, that host is the unambiguous launch target and becomes the rotation
+        target, so its candidate login nodes can still fail over.
 
         :param cloud: The HPC cloud being provisioned (``"slurm"``/``"lsf"``).
+        :param target_alias: The cluster alias being launched (the second infra
+            segment), whose candidate login nodes the returned rotator cycles; may be
+            ``None`` (or unmatched), in which case the rotator cannot fail over unless
+            the single-host fallback above applies.
+        :returns: A rotator for the just-materialized config, or ``None`` when there
+            is no inline SSH config for this cloud.
         :raises SkypilotConfigCollisionError: On a foreign (non-gbserver) clash, or
-            a differing block for the same alias owned by another environment.
+            a differing (non-``HostName``) block for the same alias owned by another
+            environment.
         """
         cfg = self.config.config if self.config else {}
         ssh_raw = cfg.get("cluster_ssh_configs")
         if not ssh_raw:
-            return
-        from gbserver.environment.skypilot_config import materialize_ssh_for_cloud
+            return None
+        from gbserver.environment.skypilot_config import (
+            _read_managed_hostnames,
+            _resolve_cloud_hosts,
+        )
         from gbserver.types.environmentconfig import ClusterSshConfigs
 
         ssh = ClusterSshConfigs.model_validate(ssh_raw)
         name = self.config.name if self.config else "unknown"
-        materialize_ssh_for_cloud(name, ssh, self.secrets or {}, cloud)
+        secrets = self.secrets or {}
+        # Resolve IdentityKey -> managed key file (local I/O, off the loop).
+        hosts = await asyncio.to_thread(_resolve_cloud_hosts, ssh, secrets, cloud)
+        if not hosts:
+            return None
+        # Bare infra (no cluster segment) + exactly one declared host: that host is
+        # the unambiguous target, so its login nodes can still fail over (issue #439).
+        if target_alias is None and len(hosts) == 1:
+            target_alias = str(hosts[0].get("Host"))
+        # Stay on a login node already written for this build so a prior failover
+        # isn't undone by a fresh random pick (read off the loop; lock-free).
+        on_disk = await asyncio.to_thread(_read_managed_hostnames, cloud)
+        selected, target_candidates, candidate_hostnames = _select_login_nodes(
+            hosts, target_alias, on_disk
+        )
+        rotator = _LoginNodeRotator(
+            cloud, name, secrets, selected, target_candidates, candidate_hostnames
+        )
+        await rotator.materialize()
+        return rotator
 
-    def _prepare_ssh_for_launch(self: Self, cloud_group: str) -> None:
+    async def _prepare_ssh_for_launch(
+        self: Self, cloud_group: str, target_alias: Optional[str]
+    ) -> Optional[_LoginNodeRotator]:
         """Materialize SSH config for an HPC launch, optionally resetting sockets.
 
-        No-op for non-HPC clouds (k8s/aws have no shared SSH config file). For a
-        slurm/lsf launch: when ``GBTEST_SKY_SSH_RESET`` is set (manually, during
-        credential-change testing), first clear SkyPilot's cached SSH
+        No-op (returns ``None``) for non-HPC clouds (k8s/aws have no shared SSH config
+        file). For a slurm/lsf launch: when ``GBTEST_SKY_SSH_RESET`` is set (manually,
+        during credential-change testing), first clear SkyPilot's cached SSH
         ControlMaster sockets so the next connection re-authenticates against the
-        freshly materialized config instead of reusing a stale one; then merge
-        this cloud's SSH config into ``~/.<cloud>/config``. Production leaves
-        SkyPilot's socket management untouched.
+        freshly materialized config instead of reusing a stale one; then merge this
+        cloud's SSH config into ``~/.<cloud>/config``. Production leaves SkyPilot's
+        socket management untouched.
 
         :param cloud_group: Normalized target cloud (first infra segment).
+        :param target_alias: The cluster alias being launched (second infra segment),
+            forwarded to the rotator for login-node failover.
+        :returns: The login-node rotator for the launch, or ``None`` for non-HPC
+            clouds / an env with no inline SSH config.
         :raises SkypilotConfigCollisionError: On a foreign (non-gbserver) clash.
         """
         if cloud_group not in _SSH_HPC_CLOUDS:
-            return
+            return None
         from gbcommon.types.testing import is_sky_ssh_reset_enabled
 
         if is_sky_ssh_reset_enabled():
             _clear_skypilot_ssh_control_sockets()
-        self._materialize_ssh_for_launch(cloud_group)
-
-    async def _probe_hpc_login_node(self: Self, cloud_group: str, cluster: str) -> None:
-        """Probe the slurm/lsf login node with a trivial `echo` before launching.
-
-        SkyPilot runs its precheck control commands (``scontrol show partitions``)
-        over an `ssh` bounded only by ``ConnectTimeout`` — the TCP leg, not the
-        banner/login phase — with no command timeout and no retry, so a slow-banner
-        login node fails the launch as an opaque ``ValueError: Failed to get
-        partitions for cluster ...``. This names that condition up front, bounded by
-        ``ConnectTimeout`` plus an outer ``wait_for`` (the ``echo`` still incurs the
-        session-setup delay ``ConnectTimeout`` misses). Mirrors
-        ``Lsf.__is_ssh_node_reachable``.
-
-        An ``echo``, not a slurm command: tests SSH only, adds no scheduler load.
-
-        Best-effort — a failure warns and the launch proceeds, so a probe-only quirk
-        can't block a good launch; the retry classifier is the real backstop.
-
-        ``GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S=0`` skips it, and logs that it did.
-        Worth skipping where SSH slots are scarce: the probe holds one for up to
-        ``timeout``, starving the control connection SkyPilot opens next.
-
-        :param cloud_group: Normalized target cloud (``"slurm"``/``"lsf"``).
-        :param cluster: Cluster name — the ``Host`` alias in ``~/.<cloud>/config``.
-        """
-        from gbserver.types.constants import (
-            ENABLE_SSH_HOST_KEY_VERIFICATION,
-            ENV_VAR_SKYPILOT_SSH_PROBE_TIMEOUT_S,
-            GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S,
-        )
-
-        timeout = GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S
-        if cloud_group not in _SSH_HPC_CLOUDS or not cluster:
-            return
-        if timeout <= 0:
-            # After the cloud guard, so every k8s/aws launch stays quiet. Logged, not
-            # silent: otherwise a missing probe line reads as code that never ran.
-            logger.info(
-                "SSH probe disabled (%s=%s); skipping the %s login node %s "
-                "pre-launch probe",
-                ENV_VAR_SKYPILOT_SSH_PROBE_TIMEOUT_S,
-                timeout,
-                cloud_group,
-                cluster,
-            )
-            return
-        # Reuse SkyPilot's own SSH config so the probe follows the same
-        # alias/user/key/ProxyCommand directives the launch will.
-        config_path = Path.home() / f".{cloud_group}" / "config"
-        if not config_path.is_file():
-            return
-        cmds = [
-            "ssh",
-            "-F",
-            str(config_path),
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"ConnectTimeout={timeout}",
-        ]
-        # BatchMode=yes disables host-key *confirmation*, and OpenSSH defaults to
-        # StrictHostKeyChecking=ask, so without these an unknown host key is a hard
-        # refusal ("Host key verification failed", rc=255) — not an auto-accept. On a
-        # fresh runner pod (empty known_hosts) that fails every probe on any env whose
-        # cluster_ssh_configs omits them, e.g. lsf/ibm-bluevela. Since the probe is
-        # best-effort it would fail silently, never testing reachability at all.
-        # SkyPilot's own launch hardcodes both (ssh_options_list), so skipping them
-        # would make the probe stricter than the launch it predicts. Gated on the same
-        # toggle Lsf.ssh_no_verification_flags() uses, so strict probing stays
-        # available.
-        if not ENABLE_SSH_HOST_KEY_VERIFICATION:
-            cmds += [
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-            ]
-        cmds += [cluster, "echo", "gbserver probe"]
-        logger.info(
-            "probing %s login node %s for SSH reachability before launch",
-            cloud_group,
-            cluster,
-        )
-        started = time.monotonic()
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmds,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except Exception as e:  # noqa: BLE001 — probe is best-effort
-            logger.warning("could not spawn SSH probe for %s: %s", cluster, e)
-            return
-        try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.CancelledError:
-            # Don't leak the child when the launch itself is being cancelled.
-            await _kill_and_reap(proc)
-            raise
-        except Exception as e:  # noqa: BLE001 — timeout => treat as unreachable
-            # wait_for only cancels the await; kill and reap so a hung ssh (the
-            # exact late-banner case) cannot linger for the life of the runner.
-            await _kill_and_reap(proc)
-            logger.warning(
-                "SSH probe to %s login node %s did not complete within %ss (%s) — "
-                "the login node may be slow to send its SSH banner. Continuing to "
-                "launch anyway; a precheck failure from this will be retried.",
-                cloud_group,
-                cluster,
-                timeout,
-                type(e).__name__,
-            )
-            return
-        elapsed = time.monotonic() - started
-        if proc.returncode == 0:
-            logger.info(
-                "SSH probe to %s login node %s succeeded in %.1fs",
-                cloud_group,
-                cluster,
-                elapsed,
-            )
-            return
-        logger.warning(
-            "SSH probe to %s login node %s failed after %.1fs (rc=%s): %s — "
-            "continuing to launch anyway.",
-            cloud_group,
-            cluster,
-            elapsed,
-            proc.returncode,
-            (stderr or b"").decode("utf-8", errors="replace").strip(),
-        )
+        return await self._materialize_ssh_for_launch(cloud_group, target_alias)
 
     def _get_cloud(self: Self) -> str:
         """Get default cloud/infra from environment.yaml config."""
@@ -1734,15 +1822,21 @@ class Skypilot(Environment):
             build_config_name=run_meta.get("build_config_name", ""),
         )
         # The cleanup VM only mounts the shared FS and rm's the per-run workdir,
-        # so floor it to a small instance instead of SkyPilot's oversized default
-        # (an unconstrained request lands an m6i.2xlarge just to run an `rm`). A
-        # floor of 2 lands a t3.small-class (2 vCPU / 2 GiB, ~$0.02/hr): going to
-        # 1 would let SkyPilot pick a sub-1-GiB t2.nano/micro too small for its
-        # Ray runtime, and the VM lives only seconds, so the delta is negligible.
-        # _cpus_floor gates the "N+" minimum form (crashes LSF/SLURM). Issue #425.
+        # so floor it to a tiny instance instead of SkyPilot's oversized default
+        # (an unconstrained request lands an m6i.2xlarge just to run an `rm`).
+        # Request a single vCPU: on slurm/lsf that is the smallest schedulable
+        # allocation and the easiest to place when the cluster is near capacity —
+        # a 2-CPU cleanup that cannot land just orphans the per-run tree. On cloud
+        # catalogs 1 vCPU alone could match a sub-1-GiB t2.nano/micro too small
+        # for SkyPilot's Ray runtime, so pair it with a 2-GiB memory floor there
+        # (slurm/lsf match CPUs directly and don't track memory, so it is skipped
+        # for them, mirroring _resources_from_compute_config). _cpus_floor gates
+        # the "N+" minimum form (crashes LSF/SLURM). Issue #425.
         cloud = self._get_cloud()
         res_kwargs: Dict[str, Any] = {"infra": cloud}
-        res_kwargs["cpus"] = _cpus_floor(cloud, 2)
+        res_kwargs["cpus"] = _cpus_floor(cloud, 1)
+        if cloud not in _SSH_HPC_CLOUDS:
+            res_kwargs["memory"] = "2+"  # keep Ray above the sub-1-GiB nano floor
         zone = provider.cleanup_zone() if provider is not None else None
         if zone:
             res_kwargs["zone"] = zone  # land where a mount target exists
@@ -1783,9 +1877,16 @@ class Skypilot(Environment):
             # format_oserror surfaces the underlying path/errno; the full trace
             # goes to debug.
             detail = format_oserror(e) if isinstance(e, OSError) else str(e)
+            # This cleanup VM runs after the build has already completed (whatever
+            # its outcome) and only reclaims the shared-FS workdir, so its failure
+            # does NOT change the build result. Say that explicitly: the exception
+            # detail can be a raw "Failed to provision ..." dump identical to a
+            # launch failure, and must not be misread as the build failing. The
+            # only consequence is a leaked per-run tree, to be reaped separately.
             logger.warning(
-                "teardown cleanup failed; per-run tree may be ORPHANED at %s "
-                "(setup_id=%s): %s",
+                "post-build cleanup failed; this does NOT affect the build "
+                "outcome. The per-run tree is ORPHANED at %s and must be reaped "
+                "separately (setup_id=%s). Cleanup failure cause: %s",
                 workdir,
                 setup_id,
                 detail,
@@ -2109,21 +2210,20 @@ class Skypilot(Environment):
             # casing — not just the env's default_cloud.
             cloud_group = (str(infra).split("/", 1)[0] or "").lower()
 
+            # The cluster alias being launched is the second infra segment
+            # (`slurm/<cluster>/...`), which equals the SSH `Host` alias. It
+            # selects which host's candidate login nodes the rotator can fail over
+            # among; None when the infra names no cluster.
+            infra_parts = str(infra).split("/")
+            target_alias = infra_parts[1] if len(infra_parts) >= 2 else None
+
             # Merge this cloud's SSH config (HPC only; no-op for k8s/aws), and
             # optionally reset SkyPilot's ControlMaster sockets when the test flag
             # is set. Done here — before the non-SSH materialize and the API start
-            # below — so the config is in place before sky.launch connects.
-            self._prepare_ssh_for_launch(cloud_group)
-
-            # With the SSH config in place, probe the HPC login node with a
-            # trivial `echo` so a wedged/slow-banner node is reported as such
-            # instead of as an opaque SkyPilot precheck error. Best-effort: never
-            # blocks the launch (see _probe_hpc_login_node). The cluster is the
-            # middle infra segment (cloud/cluster[/partition]).
-            infra_parts = str(infra).split("/")
-            await self._probe_hpc_login_node(
-                cloud_group, infra_parts[1] if len(infra_parts) > 1 else ""
-            )
+            # below — so the config is in place before sky.launch connects. Returns
+            # a login-node rotator (or None) so a transient SSH control-plane
+            # failure can fail over to another candidate login node on retry.
+            ssh_rotator = await self._prepare_ssh_for_launch(cloud_group, target_alias)
 
             # Materialize non-SSH inline config (cloud_config / AWS creds) before
             # the API server starts / sky.launch builds the per-request config
@@ -2416,7 +2516,7 @@ class Skypilot(Environment):
             # resource-acquisition failures (e.g. a just-torn-down slurm/lsf
             # allocation not yet released on retry). See _provision_with_retry.
             job_id, _handle = await self._provision_with_retry(
-                task, cluster_name, autostop, cloud_group
+                task, cluster_name, autostop, cloud_group, ssh_rotator
             )
 
             self._cluster_names[launch_id] = cluster_name
@@ -2522,6 +2622,7 @@ class Skypilot(Environment):
         cluster_name: str,
         autostop: Optional[int],
         cloud_group: str,
+        ssh_rotator: Optional["_LoginNodeRotator"] = None,
     ) -> Tuple[Optional[int], Any]:
         """Run ``sky.launch`` + ``sky.stream_and_get`` with bounded retry on
         transient resource-acquisition failures.
@@ -2545,6 +2646,12 @@ class Skypilot(Environment):
                 step can override via ``infra:``/``resources.cloud``. Decides
                 whether generic TCP/DNS wording counts as transient (see
                 :func:`_is_transient_provision_error`).
+            ssh_rotator: Login-node rotator for this launch (HPC only; None
+                otherwise). On a transient *SSH control-plane* failure — as
+                opposed to a capacity failure, which does not rotate — it is
+                advanced to the cluster's next candidate login node and the SSH
+                config re-materialized before the retry, so a single wedged login
+                node fails over instead of failing the build.
 
         Returns:
             Tuple of (job_id, handle) from ``sky.stream_and_get``.
@@ -2629,6 +2736,21 @@ class Skypilot(Environment):
                             attempt.retry_state.attempt_number,
                             e,
                         )
+                        # Fail over to another candidate login node when the failure
+                        # is an SSH control-plane blip (not a capacity shortfall,
+                        # which any login node would hit alike). rotate() re-writes
+                        # ~/.<cloud>/config to the next candidate and returns False
+                        # when there is only one, so a true single-node outage still
+                        # surfaces via reraise after the attempts are spent.
+                        if ssh_rotator and _is_transient_ssh_error(
+                            e, cloud=cloud_group
+                        ):
+                            if await ssh_rotator.rotate():
+                                logger.warning(
+                                    "Failing over %s to login node %s before retry",
+                                    cluster_name,
+                                    ssh_rotator.target_hostname,
+                                )
                         # Bound the teardown: sky.down has no timeout of its own and
                         # talks to the same login node, so on the wedged-SSH failure
                         # that got us here it could block for the rest of the build.

@@ -46,6 +46,45 @@ no manual `rm ~/.lsf/config`); a *foreign* (non-gbserver) entry for the same ali
 (`SkypilotConfigCollisionError`). An LSF and a SLURM env run concurrently (separate files). See
 [Inline SkyPilot config](skypilot.md#inline-skypilot-config-cluster_ssh_configs--cloud_config--aws_credentials).
 
+#### Multiple login nodes (`HostName` list)
+
+`HostName` may be a single value (above) **or** a list of interchangeable candidate login hostnames
+under one `Host` block, for a cluster fronted by several equivalent login nodes:
+
+```yaml
+  cluster_ssh_configs:
+    lsf:
+      - Host: bluevela
+        HostName:                     # Candidate login nodes for this one cluster.
+          - login1.bluevela.rmf.ibm.com
+          - login2.bluevela.rmf.ibm.com
+          - login3.bluevela.rmf.ibm.com
+          - login4.bluevela.rmf.ibm.com
+        User: granitebuild
+        IdentityFile: ~/.ssh/ibm-bluevela.key
+        IdentitiesOnly: "yes"
+```
+
+At launch gbserver picks one candidate and writes it as a scalar `HostName`. The pick is **sticky** —
+a candidate already written for this cluster (e.g. by a parallel launch that just failed over) is kept
+rather than re-randomized onto a wedged node; a random candidate is chosen only when nothing is written
+yet (spreading load). The `Host` alias stays fixed (LSF derives the cluster name from it), so all
+candidates share this block's credentials.
+
+The candidates also form a **failover pool**: if provisioning fails with a transient SSH
+control-plane error (a late banner, a wedged session, a key-exchange reset), gbserver rewrites
+`~/.lsf/config` to the next candidate before retrying the launch, so a single wedged login node is
+skipped rather than failing the build. Capacity failures and SSH *auth* rejections do not trigger
+failover. Failover reuses the ordinary provision retry budget
+(`GBSERVER_SKYPILOT_PROVISION_MAX_ATTEMPTS`); when the candidates are exhausted (or there is only one)
+the genuine error surfaces. Failover is **launch-time only** — once a cluster is provisioned SkyPilot
+pins the chosen login node, so status polling, log streaming, and teardown stay on it (unlike the
+native-LSF SSH tunnel in [lsf.md](lsf.md), which re-picks per operation). This bluevela example has no
+`cluster:` under `cloud_config` on the launcher; because the env declares exactly one host for `lsf`,
+that host is the unambiguous launch target, so its candidates still fail over even on a bare `lsf`
+infra. This is otherwise identical to SLURM — see
+[Multiple login nodes on the SLURM page](skypilot-slurm.md#multiple-login-nodes-hostname-list).
+
 > **Re-keying caveat (test-only `GBTEST_SKY_SSH_RESET`).** Even after `~/.lsf/config` self-heals,
 > SkyPilot reuses a persisted SSH ControlMaster socket keyed on `(host, port, user)` — **not** the key
 > — so a changed `IdentityFile`/`IdentityKey` can be masked by a live connection until its
@@ -55,11 +94,6 @@ no manual `rm ~/.lsf/config`); a *foreign* (non-gbserver) entry for the same ali
 > re-authentication with the current key. This is a **test-only** toggle (manually set, unconditional
 > — not idle-gated); production never clears sockets, since the socket root is shared by all of the OS
 > user's SkyPilot SSH connections. It is not an environment-config key.
-
-The pre-launch SSH probe (`GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S`) covers LSF as well as SLURM, and
-our deployments disable it for both — on a slow-banner login node it starves the control connection
-SkyPilot opens next. See
-[the probe note on the SLURM page](skypilot-slurm.md#cluster_ssh_configsslurm--reachability).
 
 ### `cloud_config.lsf` — behavioral tuning
 

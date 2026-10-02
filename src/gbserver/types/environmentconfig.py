@@ -48,6 +48,13 @@ class ClusterSshConfigs(Config):
     Multiple hosts per cloud are supported, so one environment can describe
     several clusters.
 
+    ``HostName`` may be a single value (the classic single login node) **or** a list
+    of interchangeable candidate login hostnames for one cluster. gbserver picks one
+    at random per launch (spreading load) and, if a transient SSH control-plane error
+    stalls provisioning, fails over to the next candidate on retry. The chosen
+    hostname is rendered as a normal scalar ``HostName`` directive, so all candidates
+    share this entry's ``User``/``Port``/``IdentityFile``/etc.
+
     Attributes:
         slurm: Host entries rendered into ``~/.slurm/config``.
         lsf: Host entries rendered into ``~/.lsf/config``.
