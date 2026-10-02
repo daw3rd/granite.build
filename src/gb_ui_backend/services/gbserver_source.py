@@ -259,6 +259,9 @@ class GbserverSource:
             LIMIT :limit
         """)
         has_archive_column = True
+        # result.fetchall() returns a Sequence[Row], not a list, so annotate the
+        # accumulator accordingly (the empty-default and both fetch assignments
+        # below must share one type).
         rows: Sequence[Any] = []
         async with self._sessions() as session:
             try:
@@ -396,29 +399,6 @@ class GbserverSource:
             return builds, f"{warning} {truncated}" if truncated else warning
 
         # --- decode archives ---
-<<<<<<< HEAD
-        builds = []
-        for row in rows:
-            (
-                uuid_,
-                name,
-                space_name,
-                username,
-                status,
-                created_time,
-                updated_time,
-                archive,
-            ) = row
-            yaml_content = None
-            if archive:
-                try:
-                    raw = (
-                        archive
-                        if isinstance(archive, (bytes, bytearray))
-                        else archive.encode()
-                    )
-                    from gbserver.utils.archive import check_zip_safe
-=======
         def _decode_archive_rows(fetched):
             # See _yaml_from_archive_b64: this loop is why a wide scan used to
             # stall the sidecar. Hand the whole page to a worker thread.
@@ -453,7 +433,6 @@ class GbserverSource:
                     }
                 )
             return out
->>>>>>> main
 
         builds = await asyncio.to_thread(_decode_archive_rows, rows)
         return builds, _truncation_warning(rows, limit)

@@ -534,7 +534,7 @@ async def query_knowledge_base(
     max_entries: int = 20,
     exclude_build_id: Optional[uuid.UUID] = None,
 ) -> List[KnowledgeBaseEntry]:
-    from sqlalchemy import and_, case, desc, literal, nullslast, or_
+    from sqlalchemy import and_, case, desc, literal, or_
 
     stmt = select(GbdMeta).where(
         or_(
@@ -565,7 +565,10 @@ async def query_knowledge_base(
         desc(case((GbdMeta.human_solution.isnot(None), 1), else_=0)),
         desc(score),
         desc(GbdMeta.upvotes),
-        nullslast(desc(GbdMeta.feedback_rating)),
+        # Column-bound .desc().nullslast() (matching EventCollector above) keeps
+        # a precise ColumnElement type; the nullslast(desc(...)) function form
+        # types as a broad union mypy won't accept as an order_by argument.
+        GbdMeta.feedback_rating.desc().nullslast(),
         desc(GbdMeta.created_at),
     ).limit(max_entries)
 
