@@ -435,7 +435,11 @@ class Skypilot_managed(Environment):
                 # return doesn't skip status detection (and doesn't iterate the
                 # metadata tuple).
                 job_records = jobs[0] if isinstance(jobs, tuple) else jobs
-                for job in job_records:
+                # `or []` keeps the original `if jobs:` tolerance: if sky.get()
+                # ever hands back None (not in its declared type, but SkyPilot
+                # surprises), skip silently instead of raising TypeError and
+                # logging an error every poll.
+                for job in job_records or []:
                     if job.get("name") == job_name:
                         status = job.get("status")
                         cluster_name = job.get("cluster_name")
