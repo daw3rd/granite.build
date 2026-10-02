@@ -19,6 +19,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -45,9 +46,10 @@ from tenacity import (
 from gbcommon.uri.uri import URI
 from gbserver.environment.environment import Environment, EventLogLineParserConfig
 from gbserver.environment.shared_fs import (
-    build_provider,
+    build_providers,
     resolve_local_scratch,
     resolve_shared_workdir,
+    resolve_workdir_mount,
 )
 from gbserver.spaces.hf_push_config import (
     apply_hf_step_overlay,
@@ -1168,22 +1170,34 @@ def _get_cli_prefix(build_workdir: Optional[str]) -> str:
     return prefix
 
 
-def _compose_step_prologue(provider, build_workdir):
-    """Prologue prepended to setup and run. Without a provider this is exactly
-    ``_get_cli_prefix(build_workdir)`` (unchanged). With a provider: ``set -eu``,
-    the idempotent mount, then make every level from the shared-fs mount root down
-    to the per-run workdir world-writable + sticky (1777) so a later step running
-    as a different uid can create and traverse its own per-run dir, and ``cd`` in.
+def _resolved_shared_fs_dns(setup_config) -> dict:
+    """mount_point -> runtime DNS from setup_config.skypilot.shared_fs_mounts
+    (empty for BYO-only envs / before ephemeral provisioning)."""
+    mounts = ((setup_config or {}).get("skypilot", {}) or {}).get(
+        "shared_fs_mounts", []
+    )
+    return {m["mount_point"]: m["dns_name"] for m in mounts if m.get("dns_name")}
+
+
+def _compose_step_prologue(providers, resolved, workdir_mount, build_workdir):
+    """Prologue prepended to setup and run. With no providers this is exactly
+    ``_get_cli_prefix(build_workdir)``. With providers: ``set -eu``, then the
+    idempotent mount of EVERY declared filesystem (ephemeral mounts get their
+    runtime DNS from ``resolved``), then -- only for the workdir-hosting mount --
+    make the tree down to the per-run workdir world-writable + sticky (1777) and
+    ``cd`` in.
 
     The chmod walk is GUARDED: a level a prior step's uid created is not ours to
     ``chmod`` (that EPERMs, and under ``set -eu`` would abort the step in the
     prologue), and it is already 1777, so ignoring the failure is safe. Bounded by
-    the mount root, which the admin runbook chmods 1777 out of band."""
-    if provider is None:
+    the workdir mount root, which the admin runbook chmods 1777 out of band."""
+    if not providers:
         return _get_cli_prefix(build_workdir)
-    prologue = "set -eu\n" + provider.mount_prologue()
-    if build_workdir:
-        mount_root = shlex.quote(provider.mount_point)
+    prologue = "set -eu\n"
+    for p in providers:
+        prologue += p.mount_prologue(dns_override=(resolved or {}).get(p.mount_point))
+    if build_workdir and workdir_mount is not None:
+        mount_root = shlex.quote(workdir_mount.mount_point)
         prologue += (
             'mkdir -p "$GB_LOCAL_SCRATCH"\n'
             # Create the per-run tree world-writable ATOMICALLY (umask 000 in a
@@ -1269,8 +1283,8 @@ def aws_credentials_present() -> bool:
     return has_key_pair or bool(os.environ.get("AWS_PROFILE"))
 
 
-# Sentinel distinguishing "shared_filesystem provider not yet computed" from a
-# computed None (no provider). See Skypilot._shared_fs_provider.
+# Sentinel distinguishing "shared_filesystem providers not yet computed" from a
+# computed empty list (no providers). See Skypilot._shared_fs_providers.
 _PROVIDER_UNSET = object()
 
 
@@ -1335,6 +1349,10 @@ class Skypilot(Environment):
         # setup_id -> {"target_name","build_id","build_config_name"} so teardown can
         # name its cleanup cluster the same human-identifiable way as launch.
         self._setup_run_meta: Dict[str, Dict[str, str]] = {}
+        # setup_id -> [(provider, ProvisionedResources|None)] created by
+        # setup_skypilot; teardown_skypilot deprovisions from it. Keyed by
+        # setup_id so concurrent target-runs never share ephemeral runtime state.
+        self._setup_provisioned: Dict[str, list] = {}
         # launch_id -> kwargs replayed by retry_workload
         self._launch_kwargs: Dict[str, Dict] = {}
         self._skypilot_retry_complete_events: Dict[str, asyncio.Event] = {}
@@ -1351,11 +1369,15 @@ class Skypilot(Environment):
         # periodic/startup pull resumes after the lines it last emitted events
         # for instead of re-emitting from the top each time.
         self._log_lines_parsed: Dict[str, int] = {}
-        # Lazily-memoized shared_filesystem provider. Left UNSET here (not
-        # computed) so build_provider still runs on first use — preserving the
+        # Lazily-memoized shared_filesystem providers (list). Left UNSET here (not
+        # computed) so build_providers still runs on first use — preserving the
         # pre-memoization validation timing and letting tests monkeypatch
-        # build_provider after construction. See _shared_fs_provider.
-        self._shared_fs_provider_cache: Any = _PROVIDER_UNSET
+        # build_providers after construction. See _shared_fs_providers.
+        self._shared_fs_providers_cache: Any = _PROVIDER_UNSET
+        # Lazily-memoized workdir-hosting mount (or None). Same UNSET-until-first-
+        # use rationale as the provider cache above: resolve_workdir_mount re-runs
+        # full validation + the uniqueness scan, and launch/teardown both need it.
+        self._workdir_mount_cache: Any = _PROVIDER_UNSET
         super().__init__(
             event_q=event_q,
             environment_config=environment_config,
@@ -1498,18 +1520,50 @@ class Skypilot(Environment):
             return "k8s"
         return self.config.config.get("default_cloud", "k8s")
 
-    def _shared_fs_provider(self: Self):
-        """The shared_filesystem provider for this env (or None), memoized.
+    def _aws_profile(self: Self) -> Optional[str]:
+        """The AWS profile SkyPilot/boto3 use, from cloud_config or aws_credentials."""
+        cfg = (self.config.config if self.config else {}) or {}
+        ws = ((cfg.get("cloud_config") or {}).get("workspaces") or {}).get(
+            "default"
+        ) or {}
+        prof = (ws.get("aws") or {}).get("profile")
+        if prof:
+            return prof
+        # Scan ALL aws_credentials for the first entry carrying a profile -- not
+        # just [0]: if the profile isn't the first entry (or [0] has none), the
+        # old [0]-only check silently returned None, falling back to the default
+        # boto3 chain, so ephemeral EFS would be created/torn down in the WRONG
+        # account (mount fails; teardown leaks the real filesystem).
+        creds = cfg.get("aws_credentials")
+        if isinstance(creds, list):
+            for c in creds:
+                if isinstance(c, dict) and c.get("profile"):
+                    return c["profile"]
+        return None
 
-        ``build_provider`` re-validates the ``shared_filesystem`` block, and
+    def _shared_fs_providers(self: Self):
+        """The shared_filesystem providers for this env (list, possibly empty),
+        memoized. Config-only/stateless; per-run runtime state is keyed by
+        setup_id, so concurrent target-runs never collide.
+
+        ``build_providers`` re-validates the ``shared_filesystem`` block, and
         launch, the built-in launcher env, and teardown all consult it — so
         compute it at most once per environment instance. Lazy rather than in
         ``__init__`` so the (potentially raising) validation still happens on
         first use, matching the pre-memoization timing.
         """
-        if self._shared_fs_provider_cache is _PROVIDER_UNSET:
-            self._shared_fs_provider_cache = build_provider(self.config)
-        return self._shared_fs_provider_cache
+        if self._shared_fs_providers_cache is _PROVIDER_UNSET:
+            self._shared_fs_providers_cache = build_providers(self.config)
+        return self._shared_fs_providers_cache
+
+    def _workdir_mount(self: Self):
+        """The shared_filesystem mount that hosts ``shared_workdir`` (or None),
+        memoized. ``resolve_workdir_mount`` re-parses/validates the whole block on
+        each call, so compute it at most once per env instance (mirrors
+        ``_shared_fs_providers``); lazy so first-use validation timing is kept."""
+        if self._workdir_mount_cache is _PROVIDER_UNSET:
+            self._workdir_mount_cache = resolve_workdir_mount(self.config)
+        return self._workdir_mount_cache
 
     def _get_idle_minutes(self: Self) -> int:
         """Get idle_minutes_to_autostop from environment.yaml config."""
@@ -1766,17 +1820,102 @@ class Skypilot(Environment):
             runmetadata.targetrun_id or "",
         )
         self._setup_workdirs[setup_id] = workdir
+        # Fall back to the (unique) setup_id when targetrun_id is empty. A real
+        # target run always carries a UUID targetrun_id, but the field defaults to
+        # "" -- and the per-mount SG name folds this in, so an empty value would
+        # let two concurrent same-mount_point runs compute an identical SG name
+        # and tear each other's SG down. setup_id is unique per setup, keeping the
+        # tag non-empty and the resources reclaimable (issue #391 / PR #422).
+        targetrun_tag = runmetadata.targetrun_id or setup_id
         self._setup_run_meta[setup_id] = {
             "target_name": runmetadata.target_name or "",
             "build_id": runmetadata.build_id or "",
             "build_config_name": runmetadata.build_config_name or "",
+            # Stashed for teardown, which gets no runmetadata: the ephemeral EFS is
+            # tagged with this id, so the orphan WARNING must name it (reclaim by tag).
+            "targetrun_id": targetrun_tag,
         }
+        providers = self._shared_fs_providers()
+        profile = self._aws_profile()
+        tags = {
+            "app": "granite.build",
+            "gb-ephemeral": "true",
+            "gb-build-id": runmetadata.build_id or "",
+            "gb-targetrun-id": targetrun_tag,
+            "gb-created-at": datetime.now(timezone.utc).isoformat(),
+        }
+        provisioned: list = []
+        shared_fs_mounts: list = []
+        # Register the (shared, mutated-in-place) list BEFORE provisioning so a
+        # teardown can reap anything already created even if setup is aborted or
+        # cancelled before it finishes -- the boto3 provision runs in a thread that
+        # can't be stopped once started (issue #391 no-leak-on-cancel).
+        self._setup_provisioned[setup_id] = provisioned
+        try:
+            for p in providers:
+                # Shield each provision: its boto3 work runs in an uncancellable
+                # thread, so if THIS coroutine is cancelled mid-provision we drain
+                # the shielded task to capture the resources it created (and roll
+                # them back below) rather than orphaning billable infra.
+                task = asyncio.ensure_future(p.provision(tags, profile))
+                try:
+                    pr = await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    try:
+                        await asyncio.shield(task)
+                    except BaseException:  # noqa: BLE001 - captured via task below
+                        pass
+                    if (
+                        task.done()
+                        and not task.cancelled()
+                        and task.exception() is None
+                        and task.result() is not None
+                    ):
+                        provisioned.append((p, task.result()))
+                    raise
+                provisioned.append((p, pr))
+                shared_fs_mounts.append(
+                    {
+                        "mount_point": p.mount_point,
+                        "dns_name": pr.dns_name if pr is not None else None,
+                    }
+                )
+        except BaseException:
+            # Best-effort roll back everything already created (incl. a drained
+            # in-flight mount) before re-raising, so a partial OR cancelled setup
+            # does not leak. BaseException (not Exception) so CancelledError also
+            # triggers rollback; each deprovision is shielded so it still runs under
+            # cancellation. Mounts that fail to deprovision are kept so teardown can
+            # retry them (and are logged as reclaimable orphans).
+            remaining: list = []
+            for p, pr in provisioned:
+                if pr is None:
+                    continue
+                try:
+                    await asyncio.shield(
+                        asyncio.ensure_future(p.deprovision(pr, profile))
+                    )
+                except BaseException:  # noqa: BLE001 - best-effort during rollback
+                    logger.warning(
+                        "setup_skypilot: rollback deprovision failed; ORPHAN "
+                        "fsid=%s sg=%s tags(build=%s,targetrun=%s)",
+                        pr.file_system_id,
+                        pr.security_group_id,
+                        runmetadata.build_id,
+                        targetrun_tag,
+                    )
+                    remaining.append((p, pr))
+            provisioned[:] = remaining  # reaped ones gone; teardown retries the rest
+            raise
         logger.info(
-            "setup_skypilot: per-run workdir for setup_id=%s -> %s",
+            "setup_skypilot: per-run workdir for setup_id=%s -> %s (mounts=%d)",
             setup_id,
             workdir,
+            len(providers),
         )
-        return {"skypilot": {"build_workdir": workdir}}
+        return {
+            "skypilot": {"build_workdir": workdir, "shared_fs_mounts": shared_fs_mounts}
+        }
 
     async def teardown_skypilot(self: Self, setup_id: str, **kwargs) -> None:
         """Remove the per-run workdir provisioned by ``setup_skypilot``.
@@ -1791,30 +1930,71 @@ class Skypilot(Environment):
         """
         workdir = self._setup_workdirs.pop(setup_id, None)
         run_meta = self._setup_run_meta.pop(setup_id, {})
-        if not workdir:
+        provisioned = self._setup_provisioned.pop(setup_id, [])
+        if not workdir and not provisioned:
             return
+        providers = self._shared_fs_providers()
+        workdir_mount = self._workdir_mount()
+        provider = next(
+            (
+                p
+                for p in providers
+                if workdir_mount is not None
+                and p.mount_point == workdir_mount.mount_point
+            ),
+            None,
+        )
+        workdir_is_ephemeral = bool(
+            workdir_mount is not None
+            and workdir_mount.efs is not None
+            and workdir_mount.efs.provision == "ephemeral"
+        )
+        # For a BYO workdir mount, reap the per-run tree via the throwaway VM. For
+        # an ephemeral workdir mount, skip it -- the deprovision below deletes the
+        # whole filesystem anyway.
+        if workdir and not workdir_is_ephemeral:
+            await self._reap_per_run_workdir(workdir, provider, run_meta, setup_id)
+        # Deprovision every ephemeral mount created in setup (regardless of which
+        # mount hosts the workdir).
+        await self._deprovision_ephemeral(provisioned, run_meta, setup_id)
+
+    async def _reap_per_run_workdir(
+        self: Self, workdir: str, provider, run_meta: Dict, setup_id: str
+    ) -> None:
+        """Reap a BYO workdir mount's per-run tree. A shared_filesystem provider
+        cleans it via its own shell (and may pin the throwaway VM to an AZ with a
+        mount target); without a provider a plain ``rm -rf`` suffices. A non-mount
+        backend (object-store / stage-out) reaps server-side with no VM."""
         _require_skypilot()
-        provider = self._shared_fs_provider()
-        # A shared_filesystem provider cleans the whole per-run tree via its own
-        # shell (and may pin the throwaway VM to an AZ that has a mount target);
-        # without a provider a plain rm -rf of the workdir suffices. Only the run
-        # script and the optional zone differ.
         run_script = (
             provider.cleanup_run_script(workdir)
             if provider is not None
             else f"rm -rf {shlex.quote(workdir)}"
         )
         if provider is not None and run_script is None:
-            # A non-mount backend (e.g. object-store / stage-out) reaps its per-run
-            # state server-side, with no throwaway VM to launch.
             logger.info(
-                "teardown_skypilot: provider reaps per-run workdir %s server-side "
-                "(setup_id=%s)",
+                "teardown_skypilot: provider reaps per-run workdir %s "
+                "server-side (setup_id=%s)",
                 workdir,
                 setup_id,
             )
             await provider.cleanup()
-            return
+        else:
+            await self._launch_cleanup_vm(
+                workdir, run_script, provider, run_meta, setup_id
+            )
+
+    async def _launch_cleanup_vm(
+        self: Self,
+        workdir: str,
+        run_script: str,
+        provider,
+        run_meta: Dict,
+        setup_id: str,
+    ) -> None:
+        """Launch a one-shot throwaway VM that runs ``run_script`` to reap the
+        per-run tree, then tears itself down. Failures are logged (naming the
+        orphan for reclamation) not raised -- the build has already finished."""
         cluster_name = self._cluster_name_for(
             f"td-{setup_id}",
             target_name=run_meta.get("target_name", ""),
@@ -1871,11 +2051,10 @@ class Skypilot(Environment):
                 down=True,
             )
             await asyncio.to_thread(sky.stream_and_get, request_id)
-        except Exception as e:  # don't fail an already-finished build for cleanup
+        except Exception as e:  # don't fail a finished build for cleanup
             # Make an orphaned per-run tree visible so it can be reaped (see the
             # teardown notes in docs/environments/skypilot-aws.md). For OSError,
-            # format_oserror surfaces the underlying path/errno; the full trace
-            # goes to debug.
+            # format_oserror surfaces the path/errno; full trace goes to debug.
             detail = format_oserror(e) if isinstance(e, OSError) else str(e)
             # This cleanup VM runs after the build has already completed (whatever
             # its outcome) and only reclaims the shared-FS workdir, so its failure
@@ -1900,6 +2079,39 @@ class Skypilot(Environment):
             cloud_group = (str(self._get_cloud()).split("/", 1)[0] or "").lower()
             if cloud_group in _CLOUDS_NEEDING_MANUAL_TEARDOWN:
                 await self._teardown(cluster_name)
+
+    async def _deprovision_ephemeral(
+        self: Self, provisioned: list, run_meta: Dict, setup_id: str
+    ) -> None:
+        """Deprovision every ephemeral mount created in setup. Never fail an
+        already-finished build for cleanup: on failure log a WARNING naming the
+        orphan (fsid/mount targets/SG + build/targetrun tags) so it can be
+        reclaimed by tag."""
+        profile = self._aws_profile()
+        for p, pr in provisioned:
+            if pr is None:
+                continue
+            try:
+                await p.deprovision(pr, profile)
+                logger.info(
+                    "teardown_skypilot: deprovisioned ephemeral EFS %s (setup_id=%s)",
+                    pr.file_system_id,
+                    setup_id,
+                )
+            except Exception as e:  # noqa: BLE001 - never fail a finished build
+                logger.warning(
+                    "teardown_skypilot: ephemeral EFS deprovision FAILED -- ORPHAN "
+                    "fsid=%s mount_targets=%s sg=%s(created=%s) region=%s "
+                    "tags(build=%s,targetrun=%s); reclaim by tag. Error: %s",
+                    pr.file_system_id,
+                    pr.mount_target_ids,
+                    pr.security_group_id,
+                    pr.created_sg,
+                    pr.region,
+                    run_meta.get("build_id", ""),
+                    run_meta.get("targetrun_id", ""),
+                    e,
+                )
 
     @staticmethod
     def _parse_memory_gib(memory_str: str) -> Optional[float]:
@@ -2105,7 +2317,7 @@ class Skypilot(Environment):
             # exported when a shared_filesystem provider is active: the provider
             # prologue creates it (mkdir -p "$GB_LOCAL_SCRATCH"); plain shared_workdir
             # envs (bluevela/SLURM/k8s) have no provider, so must not see it.
-            if self._shared_fs_provider() is not None:
+            if self._shared_fs_providers():
                 env["GB_LOCAL_SCRATCH"] = (
                     resolve_local_scratch(self.config) or "/tmp/gb-scratch"
                 )
@@ -2464,14 +2676,18 @@ class Skypilot(Environment):
             # scripts stay in SkyPilot's default ~/sky_workdir, where relative
             # file_mounts land. Only prefix setup when there is a setup script, so
             # steps without one don't acquire a spurious setup phase.
-            provider = self._shared_fs_provider()
-            if provider is not None:
+            providers = self._shared_fs_providers()
+            for _p in providers:
                 # Surface a transit-encryption caveat in the gbserver log at launch
                 # (the mount prologue also warns, but only in the step log).
-                note = provider.transit_encryption_note()
+                note = _p.transit_encryption_note()
                 if note:
                     logger.warning(note)
-            cli_prefix = _compose_step_prologue(provider, build_workdir)
+            workdir_mount = self._workdir_mount()
+            resolved = _resolved_shared_fs_dns(kwargs.get("setup_config"))
+            cli_prefix = _compose_step_prologue(
+                providers, resolved, workdir_mount, build_workdir
+            )
             run_script = cli_prefix + launcher_config.get("run", "")
             if setup_script:
                 setup_script = cli_prefix + setup_script

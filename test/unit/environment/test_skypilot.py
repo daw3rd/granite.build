@@ -2049,7 +2049,7 @@ from gbserver.environment import skypilot as skymod
 class _FakeProvider:
     mount_point = "/mnt/gb-shared"
 
-    def mount_prologue(self):
+    def mount_prologue(self, dns_override=None):
         return "echo MOUNT_HERE\n"
 
     def cleanup_run_script(self, workdir):
@@ -2059,6 +2059,11 @@ class _FakeProvider:
         return "us-east-1a"
 
 
+class _WorkdirMount:
+    def __init__(self, mp):
+        self.mount_point = mp
+
+
 def test_prologue_orders_mount_before_cd_and_chmods_1777():
     import subprocess
 
@@ -2066,7 +2071,10 @@ def test_prologue_orders_mount_before_cd_and_chmods_1777():
     # mount is still at mount_point (/mnt/gb-shared). The chmod-walk sentinel is
     # mount_point, so the extra gbroot level is created and chmod'd during the walk.
     prologue = skymod._compose_step_prologue(
-        _FakeProvider(), "/mnt/gb-shared/gbroot/builds/b/runs/r"
+        [_FakeProvider()],
+        {},
+        _WorkdirMount("/mnt/gb-shared"),
+        "/mnt/gb-shared/gbroot/builds/b/runs/r",
     )
     assert prologue.startswith("set -eu")
     # Mount, then chmod, then cd.
@@ -2093,9 +2101,302 @@ def test_prologue_orders_mount_before_cd_and_chmods_1777():
 
 
 def test_prologue_no_provider_is_plain_cli_prefix():
-    assert skymod._compose_step_prologue(None, "/mnt/x") == skymod._get_cli_prefix(
-        "/mnt/x"
+    assert skymod._compose_step_prologue([], {}, None, "/mnt/x") == (
+        skymod._get_cli_prefix("/mnt/x")
     )
+
+
+# --- Task 9: multi-mount step prologue (#404/#391) ---
+
+
+class _FakeProv:
+    def __init__(self, mp):
+        self.mount_point = mp
+
+    def mount_prologue(self, dns_override=None):
+        return f"# mount {self.mount_point} dns={dns_override}\n"
+
+    def transit_encryption_note(self):
+        return None
+
+
+def test_compose_prologue_mounts_every_provider_chmods_only_workdir():
+    ps = [_FakeProv("/mnt/a"), _FakeProv("/mnt/b")]
+    sh = skymod._compose_step_prologue(
+        ps, {"/mnt/b": "fs-b.dns"}, _WorkdirMount("/mnt/a"), "/mnt/a/builds/b1/runs/r1"
+    )
+    assert sh.startswith("set -eu\n")
+    assert "# mount /mnt/a dns=None" in sh  # BYO: no override
+    assert "# mount /mnt/b dns=fs-b.dns" in sh  # ephemeral: override threaded
+    assert 'cd "$GB_BUILD_WORKDIR"' in sh  # workdir mount only
+    # chmod-walk bounded by the WORKDIR mount root, not the other mount
+    assert "!= '/mnt/a'" in sh or "/mnt/a" in sh
+
+
+def test_compose_prologue_no_providers_is_plain_cli_prefix():
+    assert skymod._compose_step_prologue([], {}, None, "/x") == skymod._get_cli_prefix(
+        "/x"
+    )
+
+
+def test_resolved_shared_fs_dns_reads_setup_config():
+    sc = {
+        "skypilot": {
+            "build_workdir": "/mnt/e/w",
+            "shared_fs_mounts": [
+                {"mount_point": "/mnt/e", "dns_name": "fs-x.dns"},
+                {"mount_point": "/mnt/byo", "dns_name": None},
+            ],
+        }
+    }
+    assert skymod._resolved_shared_fs_dns(sc) == {"/mnt/e": "fs-x.dns"}
+    assert skymod._resolved_shared_fs_dns(None) == {}
+
+
+# --- Task 10: setup_skypilot provisions ephemeral EFS + threads runtime DNS ---
+
+
+def _make_skypilot(cfg):
+    from gbserver.environment.skypilot import Skypilot
+    from gbserver.types.environmentconfig import EnvironmentConfig
+
+    env = EnvironmentConfig(name="e", type="Skypilot", subtype="aws", config=cfg)
+    return Skypilot(event_q=asyncio.Queue(), environment_config=env)
+
+
+class _RM:  # runmetadata
+    build_id = "b1"
+    targetrun_id = "r1"
+    target_name = "t"
+    build_config_name = "c"
+
+
+def test_aws_profile_from_cloud_config():
+    sp = _make_skypilot(
+        {
+            "default_cloud": "aws",
+            "cloud_config": {
+                "workspaces": {"default": {"aws": {"profile": "gb-skypilot"}}}
+            },
+        }
+    )
+    assert sp._aws_profile() == "gb-skypilot"
+
+
+def test_aws_profile_scans_all_credentials_entries():
+    """The profile may not be the first aws_credentials entry (and the first may
+    carry only keys). _aws_profile must find it anyway -- else ephemeral EFS is
+    created/torn down under the default boto3 chain in the wrong account (PR #422
+    review)."""
+    sp = _make_skypilot(
+        {
+            "default_cloud": "aws",
+            "aws_credentials": [
+                {"aws_access_key_id": "K", "aws_secret_access_key": "S"},
+                {"profile": "gb-skypilot"},
+            ],
+        }
+    )
+    assert sp._aws_profile() == "gb-skypilot"
+
+
+def test_aws_profile_none_when_no_profile_anywhere():
+    sp = _make_skypilot(
+        {
+            "default_cloud": "aws",
+            "aws_credentials": [{"aws_access_key_id": "K"}],
+        }
+    )
+    assert sp._aws_profile() is None
+
+
+def test_setup_provisions_ephemeral_and_threads_dns():
+    from unittest import mock
+
+    from gbserver.environment.shared_fs.base import ProvisionedResources
+
+    cfg = {
+        "default_cloud": "aws",
+        "shared_workdir": "/mnt/e/work",
+        "shared_filesystem": [
+            {
+                "provider": "efs",
+                "mount_point": "/mnt/e",
+                "efs": {"provision": "ephemeral", "region": "us-east-1"},
+            }
+        ],
+    }
+    sp = _make_skypilot(cfg)
+    fake_pr = ProvisionedResources(
+        region="us-east-1",
+        file_system_id="fs-x",
+        dns_name="fs-x.efs.us-east-1.amazonaws.com",
+        mount_target_ids=["mt-1"],
+        subnet_ids=["subnet-a"],
+        security_group_id="sg-1",
+        created_sg=True,
+    )
+    with mock.patch.object(
+        type(sp._shared_fs_providers()[0]),
+        "provision",
+        new=mock.AsyncMock(return_value=fake_pr),
+    ):
+        out = asyncio.run(sp.setup_skypilot("sid-1", _RM()))
+    mounts = out["skypilot"]["shared_fs_mounts"]
+    assert mounts == [{"mount_point": "/mnt/e", "dns_name": fake_pr.dns_name}]
+    assert sp._setup_provisioned["sid-1"][0][1] is fake_pr
+    assert out["skypilot"]["build_workdir"].startswith("/mnt/e/work/builds/b1/runs/r1")
+
+
+def _one_ephemeral_cfg():
+    return {
+        "default_cloud": "aws",
+        "shared_workdir": "/mnt/e/work",
+        "shared_filesystem": [
+            {
+                "provider": "efs",
+                "mount_point": "/mnt/e",
+                "efs": {"provision": "ephemeral", "region": "us-east-1"},
+            }
+        ],
+    }
+
+
+def _pr(fsid="fs-x", sg="sg-1"):
+    from gbserver.environment.shared_fs.base import ProvisionedResources
+
+    return ProvisionedResources(
+        region="us-east-1",
+        file_system_id=fsid,
+        dns_name=f"{fsid}.efs.us-east-1.amazonaws.com",
+        mount_target_ids=["mt-1"],
+        subnet_ids=["subnet-a"],
+        security_group_id=sg,
+        created_sg=True,
+    )
+
+
+def test_setup_falls_back_to_setup_id_when_targetrun_id_empty():
+    """An empty targetrun_id must not produce a shared SG name across concurrent
+    same-mount_point runs (the gb-targetrun-id tag is folded into the SG name);
+    it falls back to the unique setup_id (PR #422 review)."""
+    from unittest import mock
+
+    sp = _make_skypilot(_one_ephemeral_cfg())
+
+    class _RMNoTargetrun:
+        build_id = "b1"
+        targetrun_id = ""
+        target_name = "t"
+        build_config_name = "c"
+
+    with mock.patch.object(
+        type(sp._shared_fs_providers()[0]),
+        "provision",
+        new=mock.AsyncMock(return_value=_pr()),
+    ) as prov:
+        asyncio.run(sp.setup_skypilot("sid-unique-xyz", _RMNoTargetrun()))
+    tags = prov.await_args.args[0]
+    assert tags["gb-targetrun-id"] == "sid-unique-xyz"  # unique, not ""
+
+
+def test_setup_rolls_back_earlier_mounts_on_later_failure():
+    """A failure provisioning a later mount rolls back the already-created mounts
+    and clears the record so teardown doesn't double-reap (issue #391)."""
+    from unittest import mock
+
+    cfg = {
+        "default_cloud": "aws",
+        "shared_workdir": "/mnt/a/work",
+        "shared_filesystem": [
+            {
+                "provider": "efs",
+                "mount_point": "/mnt/a",
+                "efs": {"provision": "ephemeral", "region": "us-east-1"},
+            },
+            {
+                "provider": "efs",
+                "mount_point": "/mnt/b",
+                "efs": {"provision": "ephemeral", "region": "us-east-1"},
+            },
+        ],
+    }
+    sp = _make_skypilot(cfg)
+    pr1 = _pr(fsid="fs-1")
+    provcls = type(sp._shared_fs_providers()[0])
+    with (
+        mock.patch.object(
+            provcls,
+            "provision",
+            new=mock.AsyncMock(side_effect=[pr1, RuntimeError("boom")]),
+        ),
+        mock.patch.object(provcls, "deprovision", new=mock.AsyncMock()) as dep,
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            asyncio.run(sp.setup_skypilot("sid-rb", _RM()))
+    dep.assert_awaited_once()
+    assert dep.await_args.args[0] is pr1  # earlier mount rolled back
+    assert sp._setup_provisioned["sid-rb"] == []  # cleared; teardown won't re-reap
+
+
+def test_setup_cancel_midprovision_rolls_back_inflight_resource():
+    """Cancelling the build while an EFS is being created must NOT leak it: the
+    boto3 provision runs in an uncancellable thread, so setup shields it, drains
+    the created resource, and rolls it back (issue #391 / PR #422 High)."""
+    from unittest import mock
+
+    sp = _make_skypilot(_one_ephemeral_cfg())
+    pr = _pr(fsid="fs-inflight")
+    provcls = type(sp._shared_fs_providers()[0])
+    started = asyncio.Event()
+
+    async def slow_provision(self, tags, profile):  # noqa: ARG001
+        started.set()
+        await asyncio.sleep(0.05)  # still "creating" when the cancel lands
+        return pr
+
+    async def run_it():
+        with (
+            mock.patch.object(provcls, "provision", new=slow_provision),
+            mock.patch.object(provcls, "deprovision", new=mock.AsyncMock()) as dep,
+        ):
+            task = asyncio.create_task(sp.setup_skypilot("sid-cancel", _RM()))
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return dep
+
+    dep = asyncio.run(run_it())
+    dep.assert_awaited_once()
+    assert dep.await_args.args[0] is pr  # in-flight resource captured + reaped
+    assert sp._setup_provisioned["sid-cancel"] == []  # nothing left for teardown
+
+
+# --- Task 12: launch threads runtime DNS + env for multiple providers ---
+
+
+def test_launcher_env_exports_local_scratch_when_provider_active():
+    cfg = {
+        "default_cloud": "aws",
+        "shared_workdir": "/mnt/e/work",
+        "shared_filesystem": [
+            {
+                "provider": "efs",
+                "mount_point": "/mnt/e",
+                "local_scratch": "/opt/nvme/s",
+                "efs": {"provision": "ephemeral", "region": "us-east-1"},
+            }
+        ],
+    }
+    sp = _make_skypilot(cfg)
+    env = sp._skypilot_builtin_env(
+        launch_id="l1",
+        cluster_name="c1",
+        build_workdir="/mnt/e/work/builds/b1/runs/r1",
+    )
+    assert env["GB_LOCAL_SCRATCH"] == "/opt/nvme/s"
+    assert env["GB_SHARED_WORKDIR"] == "/mnt/e/work"
 
 
 def test_no_gbserver_pinned_container_run_options():

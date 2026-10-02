@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 logger = logging.getLogger(__name__)
 
@@ -233,14 +233,12 @@ class GbserverSource:
     ) -> tuple[List[Dict[str, Any]], str | None]:
         """Return (builds_with_yaml, warning_or_None) for data processing path scanning.
 
-        Tries to read build_archive (base64-encoded ZIP) and extract YAML inline.
-        Falls back to returning builds without YAML if the column doesn't exist,
-        so the caller can report the gap rather than silently returning nothing.
+        Reads build_archive (base64-encoded ZIP) and extracts the YAML in a worker
+        thread (`asyncio.to_thread`), via the nested `_decode_*_rows` helpers and the
+        module-level `_yaml_from_*` decoders. Falls back to returning builds without
+        YAML if the column doesn't exist, so the caller can report the gap rather
+        than silently returning nothing.
         """
-        import base64
-        import io
-        import zipfile
-
         since = datetime.now(timezone.utc) - timedelta(days=days_back)
         params = {"since": since, "limit": limit}
 

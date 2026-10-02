@@ -3,11 +3,17 @@ containerized step. SkyPilot's container run options already permit the in-conta
 mount -- ``--cap-add=SYS_ADMIN`` for mount(2) and ``--security-opt=apparmor:unconfined``
 to clear AppArmor (plus host networking to reach the mount target)."""
 
+import asyncio
 import shlex
 from typing import Optional
 
 from gbserver.environment.shared_fs.base import SharedFilesystemProvider
 from gbserver.environment.shared_fs.config import EfsConfig
+from gbserver.environment.shared_fs.efs_provisioning import (
+    EfsDeprovisionError,
+    deprovision_efs,
+    provision_efs,
+)
 
 _NFS_OPTS = (
     "nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport"
@@ -30,12 +36,30 @@ class EfsProvider(SharedFilesystemProvider):
         super().__init__(mount_point)
         self.cfg = cfg
 
-    def _mount_line(self, mp_quoted: str) -> str:
-        # Validation guarantees a derivable DNS name (fsid+region or dns_name).
-        dns = self.cfg.derived_dns_name()
-        assert dns is not None, "config validation guarantees a derivable DNS name"
+    def _mount_line(self, mp_quoted: str, dns_override: Optional[str] = None) -> str:
+        # BYO: validation guarantees a derivable DNS name (fsid+region or dns_name)
+        # and it wins. Ephemeral: config has no DNS, so the runtime dns_override
+        # (the just-created filesystem's DNS) is used.
+        dns = self.cfg.derived_dns_name() or dns_override
+        if dns is None:
+            # Only ephemeral reaches here (BYO validation guarantees a DNS): a
+            # missing override means setup_config lost the provisioned filesystem's
+            # dns_name (stale/replayed config or a broken retry). Fail with a clear
+            # message rather than letting shlex.quote(None + ':/') raise TypeError.
+            raise ValueError(
+                f"shared_filesystem: ephemeral EFS mount at {self.mount_point} has "
+                "no runtime DNS (setup_config is missing the provisioned "
+                "filesystem's dns_name)"
+            )
         tls = " -o tls" if self.cfg.tls else ""
+        # BYO carries the fsid in config; ephemeral forbids it, but its runtime DNS
+        # is the AWS-generated "<fsid>.efs.<region>.amazonaws.com", so recover the
+        # fsid from it. Without this, ephemeral never takes the mount.efs path and
+        # silently mounts cleartext nfs4 even where amazon-efs-utils is present,
+        # defeating tls=true. (BYO with only dns_name keeps nfs4 -- no fsid known.)
         fsid = self.cfg.file_system_id
+        if fsid is None and self.cfg.provision == "ephemeral":
+            fsid = dns.split(".", 1)[0]
         efs_cmd = (
             f"$SUDO mount -t efs{tls} {shlex.quote(fsid + ':/')} {mp_quoted}"
             if fsid
@@ -61,15 +85,22 @@ class EfsProvider(SharedFilesystemProvider):
             return f"if command -v mount.efs >/dev/null 2>&1; then {efs_cmd}; else {nfs_cmd}; fi"
         return nfs_cmd
 
-    def mount_prologue(self) -> str:
+    def mount_prologue(self, dns_override: Optional[str] = None) -> str:
         mp = shlex.quote(self.mount_point)
         fail = f'echo "shared_filesystem: EFS mount at {self.mount_point} failed" >&2; exit 1'
+        # Ephemeral EFS has a fresh root:root 0755 root; gbserver cannot mount it
+        # from k8s, so the first step (sudo on bare / root in container) makes it
+        # sticky world-writable so non-root steps can create the per-run workdir.
+        chmod_root = (
+            f"  $SUDO chmod 1777 {mp}\n" if self.cfg.provision == "ephemeral" else ""
+        )
         return (
             f"{_SUDO_SETUP}"
             f"{_INSTALL_NFS}\n"
             f"if ! mountpoint -q {mp}; then\n"
             f"  $SUDO mkdir -p {mp}\n"
-            f"  {self._mount_line(mp)} || {{ {fail}; }}\n"
+            f"  {self._mount_line(mp, dns_override)} || {{ {fail}; }}\n"
+            f"{chmod_root}"
             f"fi\n"
         )
 
@@ -87,6 +118,38 @@ class EfsProvider(SharedFilesystemProvider):
             + f'rmdir --ignore-fail-on-non-empty "$(dirname {pr})" 2>/dev/null || true\n'
             + f'rmdir --ignore-fail-on-non-empty "$(dirname "$(dirname {pr})")" 2>/dev/null || true\n'
         )
+
+    def _session(self, aws_profile):
+        # Lazy: boto3 ships only with the skypilot/aws extra; BYO + non-AWS envs
+        # and unit tests import this module without it (mirror _require_skypilot).
+        import boto3
+
+        return (
+            boto3.Session(profile_name=aws_profile) if aws_profile else boto3.Session()
+        )
+
+    async def provision(self, tags, aws_profile):
+        if self.cfg.provision != "ephemeral":
+            return None
+        session = self._session(aws_profile)
+        return await asyncio.to_thread(
+            provision_efs,
+            session,
+            self.cfg.region,
+            tags,
+            self.cfg.vpc_id,
+            self.cfg.subnets,
+            self.cfg.security_group_id,
+            self.mount_point,
+        )
+
+    async def deprovision(self, provisioned, aws_profile):
+        if provisioned is None:
+            return
+        session = self._session(aws_profile)
+        failures = await asyncio.to_thread(deprovision_efs, session, provisioned)
+        if failures:
+            raise EfsDeprovisionError(provisioned, failures)
 
     def cleanup_zone(self) -> Optional[str]:
         return self.cfg.cleanup_zone
