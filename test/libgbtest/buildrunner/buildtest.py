@@ -79,11 +79,8 @@ from gbserver.storage.stored_step_run import StoredStepRun
 from gbserver.storage.stored_target_run import StoredTargetRun
 from gbserver.types.artifact import ArtifactType
 from gbserver.types.constants import (
-    GB_ENVIRONMENT,
     GBSERVER_DEFAULT_BUILDRUNNER_TYPE,
-    GBSERVER_GBSERVER_IMAGE_TAG,
     GBSERVER_GITHUB_TOKEN,
-    GBSERVER_SIDECAR_MONITORING_IMAGE_TAG,
     MEM_URI_SCHEME,
 )
 from gbserver.types.status import Status
@@ -396,9 +393,9 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
             else:
                 self.was_logged_in = True  # Don't oc logout when done
         # The gbserver/sidecar image-tag env vars (needed for K8s/BuildRunnerJob
-        # builds) are now asserted by check_cloud_config(), gated on the `ibm`
-        # marker via the conftest `_check_test_env` fixture — so non-ibm build
-        # tests (e.g. local skypilot/docker) no longer require them.
+        # builds) are checked by the `requires_k8s_image_tags` skip
+        # (libgbtest.constants) on each K8s build test class — they skip without
+        # them; other build tests don't require them.
 
         super().setup_method(method)
 
