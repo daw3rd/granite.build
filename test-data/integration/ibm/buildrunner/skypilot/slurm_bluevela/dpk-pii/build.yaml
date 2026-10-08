@@ -1,5 +1,5 @@
 granite.build:
-  name: skypilot-bluevela-slurm-dpk-pii-redactor
+  name: skypilot-bluevela-slurm-dpk-pii-redactor-test
   # PII redaction through the shared `dpk` step on BlueVela SLURM (via Skypilot),
   # submitted to the gpu-mid partition. This is the REAL-CLUSTER counterpart of
   # steps/dpk/skypilot/test-data/slurm-pii/build.yaml (local Docker SLURM) and of

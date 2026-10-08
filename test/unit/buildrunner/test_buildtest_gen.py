@@ -49,6 +49,7 @@ def test_generate_skeleton_emits_fixme_placeholders(tmp_path):
     doc = yaml.safe_load(text)  # loadable YAML (FIXME is a bare string)
     assert doc["simulate_step_failure"] is False  # step-retry off
     assert doc["tests"] == ["runner"]  # cancellation disabled
+    assert doc["space_uri"] == "FIXME"  # required -> must replace
     assert sorted(doc["targets"]) == ["tokenize", "validate"]
     tok = next(e for e in doc["target_expectations"] if e["target_name"] == "tokenize")
     assert tok["output_artifact_count"] == 1  # derivable -> filled

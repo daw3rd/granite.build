@@ -19,6 +19,7 @@ def _write(tmp_path, step_count):
     p = tmp_path / "buildtest.yaml"
     p.write_text(
         "build_yaml: ./build.yaml\n"
+        "space_uri: ./space\n"
         "tests: [runner]\n"
         "simulate_step_failure: false\n"
         "targets: [t1]\n"
@@ -45,3 +46,29 @@ def test_unreplaced_placeholder_fails_validation(tmp_path):
 def test_replaced_placeholder_loads(tmp_path):
     spec = BuildTestSpecification.from_yaml(_write(tmp_path, "-1"))
     assert spec.target_expectations[0].step_count == -1
+
+
+def test_missing_space_uri_fails_validation(tmp_path):
+    """space_uri is required: a buildtest.yaml without it is rejected at load time."""
+    p = _write(tmp_path, "-1")
+    p.write_text(
+        "".join(
+            ln
+            for ln in p.read_text().splitlines(keepends=True)
+            if not ln.startswith("space_uri:")
+        )
+    )
+    with pytest.raises(Exception) as exc:
+        BuildTestSpecification.from_yaml(p)
+    assert "space_uri" in str(exc.value)
+
+
+def test_unreplaced_space_uri_placeholder_fails_validation(tmp_path):
+    """The `gbtest render` FIXME for space_uri must be replaced before running."""
+    p = _write(tmp_path, "-1")
+    p.write_text(p.read_text().replace("space_uri: ./space", "space_uri: FIXME"))
+    with pytest.raises(Exception) as exc:
+        BuildTestSpecification.from_yaml(p)
+    msg = str(exc.value)
+    assert "space_uri" in msg
+    assert "placeholder" in msg.lower()

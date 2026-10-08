@@ -20,3 +20,5 @@ timeout_minutes: 120
 # Original TestDiGiT_SFTFull_FMEval had no cancellation test — preserve that.
 tests:
   - runner
+# Space that resolves this build's space:// URIs (required by BuildTestSpecification).
+space_uri: git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config

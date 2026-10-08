@@ -1,5 +1,5 @@
 granite.build:
-  name: env_in_out_bash
+  name: env_in_out_bash-test
   # Single bash target exercising BOTH the env:// and hf:// asset stores for an
   # input and an output on the in-process Bash environment.
   #

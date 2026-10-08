@@ -1,5 +1,5 @@
 granite.build:
-  name: skypilot-bluevela-slurm-hf-2target
+  name: skypilot-bluevela-slurm-hf-2target-test
   # Two targets on BlueVela SLURM (via Skypilot) running the generic `command`
   # step: BOTH `first` and `second` run INSIDE a container image
   # (`command_config.image` set → image_id docker:<image>), the SLURM

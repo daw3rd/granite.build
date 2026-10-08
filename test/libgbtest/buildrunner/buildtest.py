@@ -172,10 +172,12 @@ class BuildTestSpecification(BaseModel):
     The specific failure event is chosen by the environment implementation (e.g. K8s injects
     an AppWrapper failure). The RetryHandler absorbs the failure and retries, so expected_status
     should still be SUCCESS unless all retries are exhausted."""
-    space_uri: Optional[str] = None
-    """If set, overrides the space's git_repo_uri so the BuildRunner resolves space:// URIs
-    from this local path instead of cloning from GitHub.  PR creation and verification are
-    automatically skipped when this is set (no GitHub repo available)."""
+    space_uri: str
+    """Required. Overrides the space's git_repo_uri so the build resolves space:// URIs
+    from this space: a local path/``file://`` URI, or a git URI such as
+    ``git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config``.  A direct
+    BuildRunner never creates PRs; BuildWatcher/BuildRunnerJob runs against a git space
+    still create (and are verified for) PRs."""
     tests: list[str] = ["runner", "runner_cancellation"]
     """Which test methods on AbstractYamlBuildRunnerTest run for this spec.
     Each value <key> maps to a method test_<key> on the base class.  Default
@@ -197,6 +199,21 @@ class BuildTestSpecification(BaseModel):
         """Allow YAML to write SUCCESS or success — Status (StrEnum) values are lowercase."""
         if isinstance(v, str):
             return v.lower()
+        return v
+
+    @field_validator("space_uri", mode="before")
+    @classmethod
+    def _reject_placeholder_space_uri(cls, v):
+        """Fail loudly if the `gbtest render` space_uri placeholder was left unreplaced.
+
+        Raises:
+            ValueError: if ``v`` is the shared ``PLACEHOLDER`` sentinel.
+        """
+        if isinstance(v, str) and v.strip() == PLACEHOLDER:
+            raise ValueError(
+                "unreplaced FIXME placeholder for 'space_uri': edit the "
+                "`gbtest render` skeleton before running it"
+            )
         return v
 
     @field_validator("tests")
@@ -225,7 +242,7 @@ class BuildTestSpecification(BaseModel):
         Specifically:
           - ``build_yaml`` defaults to ``./build.yaml`` (sibling) when omitted, and
             relative paths resolve against the YAML's parent directory.
-          - ``space_uri``: a relative ``file://`` URI or a bare relative filesystem
+          - ``space_uri`` (required): a relative ``file://`` URI or a bare relative filesystem
             path is resolved against the YAML's parent directory and returned as
             an absolute ``file://`` URI. Other URI schemes pass through unchanged.
 
@@ -252,7 +269,8 @@ class BuildTestSpecification(BaseModel):
             data["build_yaml"] = str(Path(build_yaml_override).resolve())
         else:
             data["build_yaml"] = _resolve_build_yaml(data.get("build_yaml"), yaml_dir)
-        if data.get("space_uri") is not None:
+        space_uri = data.get("space_uri")
+        if isinstance(space_uri, str) and space_uri.strip() != PLACEHOLDER:
             data["space_uri"] = _resolve_space_uri(data["space_uri"], yaml_dir)
         return cls.model_validate(data)
 
@@ -292,6 +310,25 @@ def _resolve_space_uri(value: str, yaml_dir: Path) -> str:
     if not p.is_absolute():
         p = (yaml_dir / p).resolve()
     return f"file://{p}"
+
+
+def _creates_prs(tested_class: "ClassTestedEnum", space_uri: str) -> bool:
+    """Whether a run of ``tested_class`` against ``space_uri`` is expected to open PRs.
+
+    A direct BuildRunner test always runs with ``create_pr=False``. BuildWatcher and
+    BuildRunnerJob runs create PRs against the space's git repo, so a PR is only
+    expected when ``space_uri`` is a git URI (a local ``file://`` space has no repo).
+
+    Args:
+        tested_class: Which runner class the test drives.
+        space_uri: The (resolved) space URI from the buildtest.yaml.
+
+    Returns:
+        True if PR creation should be verified for the run.
+    """
+    if tested_class == ClassTestedEnum.TEST_BUILDRUNNER:
+        return False
+    return not space_uri.startswith("file://")
 
 
 def get_test_data_dir_for(test_module_file: str) -> Path:
@@ -417,43 +454,35 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
     def _check_and_setup_space(
         self: Self, test_spec: BuildTestSpecification
     ) -> StoredSpace:
-        """Fetch the space for the test, upserting git_repo_uri when space_uri is set.
+        """Fetch the space for the test, upserting its git_repo_uri to space_uri.
 
-        When test_spec.space_uri is provided (a local file:// path), the stored space
-        record is updated so that validation.py's assertion — which compares
-        get_gb_space_config_uri(git_repo_uri) against Space.uristr — passes without
-        making any real GitHub calls.
+        The stored space record is created or updated so its git_repo_uri is
+        test_spec.space_uri, so validation.py's assertion — which compares
+        get_gb_space_config_uri(git_repo_uri) against Space.uristr — passes.
 
         Args:
             test_spec (BuildTestSpecification): The test specification containing
-                space_name and optional space_uri.
+                space_name and space_uri.
 
         Returns:
-            StoredSpace: The resolved (and possibly updated) space record.
-
-        Raises:
-            AssertionError: If no space is found and space_uri is also not set.
+            StoredSpace: The resolved (and updated) space record.
         """
         logger.info(f"Getting the {test_spec.space_name} space")
         space = self.storage.space_storage.get_by_name(name=test_spec.space_name)
         logger.info(f"Got the {test_spec.space_name} space")
-        if test_spec.space_uri is not None:
-            # Upsert the space record so git_repo_uri matches the local file:// URI.
-            # validation.py passes file:// URIs through get_gb_space_config_uri unchanged,
-            # so storing space_uri as git_repo_uri makes the assertion at line 270 pass.
-            if space is None:
-                space = StoredSpace(
-                    name=test_spec.space_name,
-                    git_repo_uri=test_spec.space_uri,
-                    lakehouse_namespace="",
-                )
-                self.storage.space_storage.add([space])
-            else:
-                space.git_repo_uri = test_spec.space_uri
-                self.storage.space_storage.update(space)
-        assert (
-            space is not None
-        ), f"failed to find a space with name {test_spec.space_name}"
+        # Upsert the space record so git_repo_uri matches space_uri.
+        # validation.py passes file:// URIs through get_gb_space_config_uri unchanged,
+        # so storing space_uri as git_repo_uri makes its space-match assertion pass.
+        if space is None:
+            space = StoredSpace(
+                name=test_spec.space_name,
+                git_repo_uri=test_spec.space_uri,
+                lakehouse_namespace="",
+            )
+            self.storage.space_storage.add([space])
+        else:
+            space.git_repo_uri = test_spec.space_uri
+            self.storage.space_storage.update(space)
         return space
 
     def _delete_output_artifacts(self: Self, build_id: str):
@@ -635,7 +664,7 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
         if test_spec.simulate_step_failure:
             self.__verify_simulated_step_retry_event(build_ids)
 
-        if test_spec.space_uri is None:
+        if _creates_prs(tested_class, test_spec.space_uri):
             logger.info("Verifying build watcher pr creation. ")
             self._verify_prs(build_ids, test_spec.space_name)
 
@@ -661,7 +690,7 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
         test_cancel: bool,
         expected_status: Status,
         timeout_seconds: float,
-        space_uri: Optional[str] = None,
+        space_uri: str,
     ) -> list[str]:
         # BuildRunner is only expected to handle builds that have these initial status values.
         assert stored_build.status in (
@@ -672,7 +701,7 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
         build_ids: list[str] = [stored_build.uuid]
         if tested_class == ClassTestedEnum.TEST_BUILDRUNNER:
             runner = BuildRunner(
-                build=stored_build, space_uri=space_uri, create_pr=space_uri is None
+                build=stored_build, space_uri=space_uri, create_pr=False
             )
         else:
             # Imported lazily so BuildRunner/thread/process-only fixtures (e.g.
