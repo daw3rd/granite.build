@@ -381,6 +381,9 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
         # here too would re-set GBTEST_MOCK_HF after the fixture lifted it,
         # force-mocking a live("hf") build test; see PR #314 review.
         self.class_tested = None
+        # Runner type of the BuildWatcher a TEST_BUILDWATCHER run created; None
+        # until one is created. Decides whether buildrunner pods are checked.
+        self._watcher_runner_type: Optional[str] = None
         run_locally = getattr(self, "run_locally", False)
         logger.info(f"Test to be run locally: {run_locally}")
         if run_locally:
@@ -423,10 +426,7 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
 
         # Clean up left over pods/jobs
         # breakpoint()
-        if self.class_tested in [
-            ClassTestedEnum.TEST_BUILDRUNNERJOB,
-            ClassTestedEnum.TEST_BUILDWATCHER,
-        ]:
+        if self._uses_buildrunner_pods():
             for build in builds:
                 delete_buildrunner_pod(build.uuid)
 
@@ -603,6 +603,7 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
                     Status.SUBMITTED
                 )  #    Buildwatcher handles SUBMITTED builds.
                 build_ids = self.__run_buildwatcher_test_build(
+                    test_spec,
                     stored_build,
                     build_count,
                     test_cancel,
@@ -649,10 +650,7 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
         else:
             self._verify_finished_builds_expectations(build_ids, test_spec)
 
-        if (
-            tested_class == ClassTestedEnum.TEST_BUILDWATCHER
-            and GBSERVER_DEFAULT_BUILDRUNNER_TYPE == "job"
-        ) or tested_class == ClassTestedEnum.TEST_BUILDRUNNERJOB:
+        if self._uses_buildrunner_pods():
             self._verify_pods_finished(build_ids)
         if test_spec.simulate_step_failure:
             self.__verify_simulated_step_retry_event(build_ids)
@@ -735,8 +733,43 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
         runner.start_and_wait()
         thread.join()  # This will raise the assert exceptions from the thread, if needed
 
+    def _uses_buildrunner_pods(self: Self) -> bool:
+        """Whether the run under test launched K8s buildrunner jobs/pods.
+
+        True for BuildRunnerJob tests, and for BuildWatcher tests whose watcher
+        uses the ``job`` runner type. Thread/process watchers run builds
+        in-process, so there are no pods to verify or clean up.
+
+        Returns:
+            True if buildrunner pods should be checked and deleted.
+        """
+        if self.class_tested == ClassTestedEnum.TEST_BUILDRUNNERJOB:
+            return True
+        return (
+            self.class_tested == ClassTestedEnum.TEST_BUILDWATCHER
+            and self._watcher_runner_type == "job"
+        )
+
+    def _create_build_watcher(
+        self: Self, test_spec: BuildTestSpecification
+    ) -> BuildWatcher:
+        """Create the BuildWatcher that a TEST_BUILDWATCHER run drives.
+
+        The default is a watcher configured from the environment (runner type from
+        GBSERVER_DEFAULT_BUILDRUNNER_TYPE, GitHub token for PRs). Subclasses
+        override it to run builds differently, e.g. in-process without GitHub.
+
+        Args:
+            test_spec: The test specification for the run.
+
+        Returns:
+            The BuildWatcher to start.
+        """
+        return BuildWatcher()
+
     def __run_buildwatcher_test_build(
         self: Self,
+        test_spec: BuildTestSpecification,
         stored_build: StoredBuild,
         build_count: int,
         test_cancel: bool,
@@ -746,7 +779,8 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
         # BuildWatcher is only expected to handle builds that have this initial status values.
         assert stored_build.status in (Status.SUBMITTED), "Unexpected build status"
         # Store the build(s) in storage and expect the BuildWatcher to pick it up and run it using a BuildRunner.
-        watcher = BuildWatcher()
+        watcher = self._create_build_watcher(test_spec)
+        self._watcher_runner_type = watcher.config.buildrunner_type
         build_ids: list[str] = []
         for i in range(0, build_count):
             # Store a copy of the build but using a different uuid
