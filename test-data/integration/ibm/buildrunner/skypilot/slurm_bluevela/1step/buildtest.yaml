@@ -12,7 +12,6 @@ target_expectations:
     step_count: 3 # hf pull, command, hf push (env:// pull+push are no-ops, no steps)
     input_artifact_count: 2 # hf input + env:// input
     output_artifact_count: 2 # hf output + env:// output
-    jobstats_count: 1
 # Resolve space:// URIs (env + the shared `command` step) from the repo's local
 # space without cloning from GitHub. Relative to this YAML's directory.
 #space_uri: ../../../../../../../configurations/spaces/local

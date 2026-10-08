@@ -123,10 +123,6 @@ class ExpectedTarget(BaseModel):
     retry re-runs a failed target under the same build id, so a target that fails
     N times before succeeding leaves N FAILED StoredTargetRun records. Defaults to
     0 (no failures), so non-retry fixtures are unaffected."""
-    jobstats_count: int = -1
-    """Expected jobstats records. Defaults to -1 (skip): jobstats are not asserted
-    at run time yet (lineage verification is a no-op under async lineage), so the
-    `gbtest render` skeleton does not force a value for it."""
     expected_steps: list[ExpectedStep] = []
     """Optional per-step metadata/config assertions checked against the persisted
     StoredStepRun rows. Empty (default) means not checked, so existing fixtures are
@@ -1248,8 +1244,6 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
 
         self._verify_step_data(build_id, step_list, expected)
 
-        self._verify_lineage(built_target, expected)
-
     def _verify_step_data(
         self: Self,
         build_id: str,
@@ -1353,33 +1347,6 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
             assert actual == expected, self._failed_build_msg(
                 build_id, f"{ctx}: actual {actual!r} expected {expected!r}"
             )
-
-    def _verify_lineage(
-        self: Self,
-        built_target: StoredTargetRun,
-        expected: ExpectedTarget,
-    ) -> None:
-        """Lineage record count is no longer asserted here.
-
-        Lineage recording used to run synchronously inside the build, so the
-        record count matched right after the build. Recording is now done
-        asynchronously by the out-of-band ``lineage-watch`` process reconciling
-        the admin DB (see ``lineage_watcher`` / ``lineage_reconciler``), which is
-        not part of the build flow exercised by this test. The record count is
-        therefore no longer a synchronous product of a build, so asserting on it
-        here no longer makes sense.
-
-        The build's own persisted lineage (target input/output artifacts, steps)
-        is still verified elsewhere in this class; only the external-store record
-        count assertion is dropped.
-
-        Args:
-            built_target: The stored target run (unused; retained for signature
-                stability with callers).
-            expected: Expected-target spec (unused).
-        """
-        # Intentionally a no-op: see docstring.
-        return
 
     def _verify_target_status(
         self, build_id: str, target: StoredTargetRun, status_list: list[Status]

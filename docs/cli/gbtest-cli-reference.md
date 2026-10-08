@@ -36,7 +36,6 @@ target_expectations:
     step_count: 5
     input_artifact_count: 1
     output_artifact_count: 1
-    jobstats_count: 3
 # Required: the space that resolves the build's space:// URIs. Takes precedence
 # over the space's git_repo_uri in the gb_spaces table. A git URI, or a local
 # path (relative file:// or filesystem paths resolve against this YAML's dir).
@@ -76,7 +75,6 @@ tests:                            # which test methods to run (see below)
 | `step_count`             | Expected number of step records (use `-1` to skip checking). |
 | `input_artifact_count`   | Expected number of input artifacts on the recorded target run. |
 | `output_artifact_count`  | Expected number of output artifacts on the recorded target run. |
-| `jobstats_count`         | Expected number of jobstats (lineage) entries. |
 
 ### The `tests:` list
 
@@ -156,8 +154,6 @@ a **skeleton** `buildtest.yaml` (to stdout, or to `-o`). It:
   (it is environment-dependent), which you must replace;
 - emits a `FIXME` for the required `space_uri` (the space that resolves the
   build's `space://` URIs), which you must replace;
-- defaults `jobstats_count` to `-1` (skip) — jobstats are not asserted at run
-  time yet, so it is not forced to a value;
 - pre-sets `simulate_step_failure: false` (no step-retry testing) and
   `tests: [runner]` (no cancellation run).
 

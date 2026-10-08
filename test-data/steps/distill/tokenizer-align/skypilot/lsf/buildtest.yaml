@@ -16,7 +16,6 @@ target_expectations:
     step_count: 1
     input_artifact_count: 0
     output_artifact_count: 3
-    jobstats_count: 1
     expected_steps:
       # The package comes from a mutable /proj checkout, so the step records which
       # commit ran and whether that checkout was dirty. Asserting both is what keeps

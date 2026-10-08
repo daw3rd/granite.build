@@ -25,7 +25,7 @@ def _write(tmp_path, step_count):
         "targets: [t1]\n"
         "target_expectations:\n"
         f"  - {{target_name: t1, input_artifact_count: 0, output_artifact_count: 1, "
-        f"step_count: {step_count}, jobstats_count: 0}}\n"
+        f"step_count: {step_count}}}\n"
     )
     return p
 
