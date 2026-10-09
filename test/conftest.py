@@ -678,10 +678,6 @@ def _mock_github_auth(request):
             "libgbtest.api.utils.get_gh_user",
             return_value=(fake_user, ""),
         ),
-        patch(
-            "integration.ibm.api.test_spaces.get_gh_user",
-            return_value=(fake_user, ""),
-        ),
     ):
         yield
 
@@ -930,10 +926,6 @@ def _mock_lineage(request):
     with (
         patch("gbserver.lineage.jobstats.get_lineage_store", return_value=mock_store),
         patch("gbserver.api.artifacts.get_lineage_store", return_value=mock_store),
-        patch(
-            "integration.ibm.api.test_artifacts.get_lineage_store",
-            return_value=mock_store,
-        ),
     ):
         yield
 

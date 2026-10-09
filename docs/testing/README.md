@@ -178,6 +178,25 @@ test/
 └── e2e/                   # end-to-end
 ```
 
+### REST API tests: standalone and IBM copies
+
+The API tests (artifacts, builds, lineage, spaces) run twice from one set of test bodies:
+
+- **`test/integration/standalone/api/`** holds the bodies, as mixin classes (`ArtifactAPITests`,
+  `BuildAPITests`, …), and runs them on **apikey auth** through `AbstractStandaloneAPITest`
+  (`libgbtest/api/utils.py`). They need no GitHub, IBM, or WandB access, in mock or live mode:
+  storage is SQLite, the `public` space is `configurations/spaces/local`, and tests needing two users
+  (admin vs. non-admin) get them by switching `GBSERVER_API_USER` per request. The lineage tests use the
+  real WandB lineage store with its WandB service stubbed out.
+- **`test/integration/ibm/api/`** subclasses the same mixins with `AbstractAPITest` and runs them on
+  **GitHub-token auth** (`GBSERVER_GITHUB_TOKEN`, plus `GBTEST_ADMIN_GITHUB_TOKEN` /
+  `GBTEST_NON_ADMIN_GITHUB_TOKEN` for the two-user tests), against the real WandB lineage service.
+
+Write new API tests in the standalone mixins so both copies pick them up. Tests name their callers
+through the identity hooks (`get_test_client(identity)`, `get_caller_username(identity)`,
+`admin_identity()`, `non_admin_identity()`, `grant_super_admin(identity)`), never a token or apikey
+user directly.
+
 ## Build-level tests: `gbtest`
 
 For asserting on a *build* (expected status, per-target step/artifact counts, cancellation behaviour),
