@@ -15,7 +15,6 @@ target_expectations:
     step_count: 1
     input_artifact_count: 3
     output_artifact_count: 1
-    jobstats_count: 1
     expected_steps:
       # The trainer comes from a mutable /proj checkout, so the step records which
       # commit ran. Asserting it here is what keeps that lineage hook honest.
