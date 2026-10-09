@@ -431,7 +431,7 @@ Added on top of (and overriding) anything in `envs`:
 ### `skypilot_monitor` config
 
 The monitor polls `sky.job_status()` and applies `event_configs` (the `GB_ARTIFACT_*` rules, which
-dual-accept the legacy `LLMB_` prefix) to the job log. Two config keys shape its behavior:
+dual-accept the legacy `LLMB_` prefix) to the job log. These config keys shape its behavior:
 
 - **`poll_interval_seconds`** — status-poll cadence. **This gates completion detection:** the monitor
   only notices a job finished on its next poll (it sleeps the interval between polls; success does not
@@ -441,6 +441,23 @@ dual-accept the legacy `LLMB_` prefix) to the job log. Two config keys shape its
   fixtures override it *down* (e.g. `5`). Written as `{{ config.poll_interval_seconds | default(300) }}`,
   so a `build.yaml` step `config:` sets it without touching the monitor.
 - **`log_retrieval.mode`** — when the job log is pulled and parsed for artifact events (below).
+- **`poll_failure_grace_seconds`** / **`poll_failure_max_seconds`** — how long failing status polls
+  are tolerated before the cluster is declared gone (FAILED, handed to the retry handler). The grace
+  defaults to **900s** on SLURM/LSF, whose polls ride an SSH login node, and to **0** elsewhere (where
+  a lost cluster is usually a real preemption). At least three polls must fail either way. Off
+  SLURM/LSF a "does not exist" poll is final at once. On LSF, once the grace is over the monitor asks
+  `bjobs` directly (at most every 5 min): a job LSF reports as gone is final, one it reports alive (or
+  cannot be asked about) is kept until the ceiling (default **7200s**). At the ceiling the job is
+  `bkill`-ed before the retry; if the `bkill` fails too, the step fails **without** a retry so two
+  allocations are never held. Values must be finite, non-negative numbers (a boolean is rejected);
+  anything else falls back to the default.
+  - A ceiling of **0** (or any value at or below the grace) means "`bkill` as soon as the grace is
+    over", with no `bjobs` check in between.
+  - A `bkill` LSF accepts does not always free the allocation at once: a job in `UNKWN` (its
+    execution host unreachable) moves to `ZOMBI` and keeps its hosts until LSF reaches them again, so
+    the retry can briefly overlap it.
+  - SLURM has no counterpart yet: after the grace a SLURM cluster is declared gone and handed to the
+    retry handler without an `scancel`, so an allocation SkyPilot lost track of is not killed.
 
 #### Log retrieval modes
 
@@ -476,6 +493,12 @@ pre-provisioning SkyPilot config files on the gbserver host, gbserver materializ
 - **Where each lands.** `cluster_ssh_configs` writes the slurm/lsf reachability files SkyPilot reads
   (`~/.<cloud>/config`); `cloud_config` is deep-merged into `~/.sky/config.yaml`; `aws_credentials`
   writes `~/.aws/credentials` (mode 0600).
+- **`cloud_config` edits take effect on the next build.** After the merge gbserver reloads its
+  in-process SkyPilot client config, so no gbserver restart is needed. That covers *changed and added*
+  keys only: the merge is a deep merge, so a key *deleted* from `cloud_config` stays in
+  `~/.sky/config.yaml` (and the reload reads it back). To drop one, remove it from
+  `~/.sky/config.yaml` as well. The loaded config is process-wide, so a build that starts while
+  another runs replaces that build's config too (for later requests such as a retry relaunch).
 - **Secret resolution.** Every `cluster_ssh_configs` directive value (except the `Host` alias) and
   every `aws_credentials` value is looked up by exact name in the environment's secrets; a match is
   substituted, otherwise the literal is used. Keep credentials and sensitive hostnames as secret
