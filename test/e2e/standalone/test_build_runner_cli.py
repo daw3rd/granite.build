@@ -79,6 +79,10 @@ _LONGRUNNING_RETRY_BUILD_DIR = _BUILD_ROOT / "longrunning-retry"
 # used to time signal delivery so we interrupt a RUNNING build, not setup.
 _RUNNING_MARKER = "waiting for events"
 
+# Log line BuildRunner.stop_and_fail emits when SIGTERM finds a pending cancel;
+# proves CANCELLED came from the SIGTERM path, not the runner's own cancel poll.
+_SIGTERM_CANCEL_MARKER = "has a pending cancel request; cancelling instead of failing"
+
 # Timeouts (seconds). First run copies the space + loads assetstores, so allow
 # generous headroom for the running marker and for the build to complete.
 _MARKER_TIMEOUT = 90
@@ -345,7 +349,8 @@ class TestBuildRunnerCliSignals(AbstractSingletonStorageUsingTest):
         CANCEL_REQUESTED and then deletes the build-runner pod, so the runner sees
         SIGTERM. It must honor the pending cancel rather than mark the build FAILED.
         Delivering SIGTERM before the runner's own (monitoring_interval-paced)
-        cancel poll reproduces that race.
+        cancel poll reproduces that race. The log marker check proves the SIGTERM
+        path (not that poll) produced the CANCELLED status.
         """
         rc = self._run_build_runner(
             _LONGRUNNING_BUILD_DIR,
@@ -355,3 +360,7 @@ class TestBuildRunnerCliSignals(AbstractSingletonStorageUsingTest):
         )
         assert self._final_build_status() == Status.CANCELLED
         assert rc == 0
+        log_text = (tmp_path / "run.log").read_text(errors="ignore")
+        assert (
+            _SIGTERM_CANCEL_MARKER in log_text
+        ), "CANCELLED did not come from the SIGTERM pending-cancel path"
