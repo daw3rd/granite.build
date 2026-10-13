@@ -200,6 +200,9 @@ ENV_VAR_GBSERVER_ENABLE_AUTOTUNEX = ENV_VAR_PREFIX + "_ENABLE_AUTOTUNEX"
 # (frontend/apps/standalone/next.config.ts).
 ENV_VAR_AUTOTUNEX_API_URL = "AUTOTUNEX_API_URL"
 ENV_VAR_BUILDRUNNERJOB_SLEEP_ON_END = ENV_VAR_PREFIX + "_BUILDRUNNERJOB_SLEEP_ON_END"
+ENV_VAR_BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS = (
+    ENV_VAR_PREFIX + "_BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS"
+)
 ENV_VAR_BUILTIN_STEP_IMAGE = ENV_VAR_PREFIX + "_BUILTIN_STEP_IMAGE"
 
 
@@ -822,6 +825,13 @@ BUILDRUNNERJOB_BUILD_WORKSPACE_PVC_NAME = os.getenv(
 )
 BUILDRUNNERJOB_CONFIGMAP_NAME = os.getenv(
     ENV_VAR_BUILDRUNNERJOB_CONFIGMAP_NAME, "granite-dot-build-configmap"
+)
+# Seconds a build-runner pod gets between SIGTERM and SIGKILL when it is deleted
+# (e.g. by `gb build cancel`). It must cover workload teardown and finalizing the
+# build, its targets/steps/artifacts and the PR comment; if the runner is killed
+# first, the build is left CANCEL_REQUESTED and the workload may be orphaned.
+BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS = int(
+    os.getenv(ENV_VAR_BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS, "60"), base=10
 )
 # Environment LSF
 # Maximum number of retries for transient LSF errors (e.g., "Cannot open your job file")

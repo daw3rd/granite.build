@@ -44,6 +44,7 @@ from gbserver.types.constants import (
     BUILDRUNNERJOB_NAMESPACE,
     BUILDRUNNERJOB_SECRET_NAME,
     BUILDRUNNERJOB_SLEEP_ON_END,
+    BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS,
     DEFAULT_GH_API_ENDPOINT,
     DEFAULT_ROOT_WORKSPACE_DIR,
     ENV_VAR_GBSERVER_K8S_USE_ASPERA,
@@ -136,6 +137,7 @@ class BuildRunnerJob(AbstractBuildRunner):
             "is_metrics_auth_enabled": GBSERVER_METRICS_AUTH_TOKEN != "",
             "build_workspace_pvc_name": BUILDRUNNERJOB_BUILD_WORKSPACE_PVC_NAME,
             "configmap_name": BUILDRUNNERJOB_CONFIGMAP_NAME,
+            "termination_grace_period_seconds": BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS,
             "dev_staging_prod_env": curr_env.env,
             "build_runner_extra_env_vars": build_runner_extra_env_vars,
         }
@@ -397,8 +399,11 @@ class BuildRunnerJob(AbstractBuildRunner):
                 await v1.delete_namespaced_pod(
                     name=pod.metadata.name,
                     namespace=self.namespace,
+                    # Same grace as the pod spec: a shorter one here would
+                    # override it and SIGKILL the runner mid-cancel.
                     body=client.V1DeleteOptions(
-                        propagation_policy="Foreground", grace_period_seconds=5
+                        propagation_policy="Foreground",
+                        grace_period_seconds=BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS,
                     ),
                 )
 
