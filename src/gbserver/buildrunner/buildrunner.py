@@ -188,7 +188,7 @@ class BuildRunner(AbstractBuildRunner):
         logger.debug("BuildRunner.stop end")
 
     def stop_and_fail(self: Self, failure_reason: str) -> None:
-        """Stop the running build and mark it FAILED.
+        """Stop the running build and mark it FAILED (CANCELLED if a cancel is pending).
 
         Public entrypoint intended to be called from another thread (e.g. a
         SIGTERM handler) while start_and_wait() runs. Flags the run as an explicit

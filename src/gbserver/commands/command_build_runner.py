@@ -458,7 +458,8 @@ def cli(
         finished_stored_build.status,
     )
     # Exit non-zero on a failed build so callers (e.g. orchestrators keying off the
-    # exit code) don't read a failure as success. SUCCESS and CANCELLED (a
-    # deliberate SIGINT cancel) exit 0; FAILED (incl. SIGTERM) and INVALID do not.
+    # exit code) don't read a failure as success. SUCCESS and CANCELLED (a SIGINT
+    # cancel, or a SIGTERM after a cancel request) exit 0; FAILED (incl. a SIGTERM
+    # with no pending cancel) and INVALID do not.
     if finished_stored_build.status in (Status.FAILED, Status.INVALID):
         raise SystemExit(1)
