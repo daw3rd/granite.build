@@ -99,6 +99,9 @@ class BuildRunnerJob(AbstractBuildRunner):
         )
         self.namespace = BUILDRUNNERJOB_NAMESPACE
         self.is_stop_requested = False
+        # Set by on_build_orchestrator_shutdown(): stop monitoring the job but leave
+        # it (and its build) running, since the runner pod outlives the watcher.
+        self.is_detach_requested = False
         self.is_running = False
         curr_env = GB_ENVIRONMENT_CONFIG
         # The exact image tag with commit will be specified in env var in the container
@@ -154,6 +157,21 @@ class BuildRunnerJob(AbstractBuildRunner):
             #     time.sleep(1)
             # self.is_stop_requested = False
 
+    def on_build_orchestrator_shutdown(self: Self) -> None:
+        """Stop monitoring the build-runner job and leave the build running.
+
+        The runner pod reports its own status to admin storage and does not depend
+        on the watcher, so its build is not cancelled. start_and_wait() returns
+        within about one monitoring interval, without marking the build
+        CANCEL_REQUESTED or deleting the job/pod (contrast stop()).
+        """
+        if self.is_running:
+            logger.info(
+                "Detaching from build-runner job for build %s; leaving it running",
+                self.stored_build.uuid,
+            )
+            self.is_detach_requested = True
+
     def start_and_wait(self: Self) -> None:
         """
         Start job/pod running the BuildRunner using the gbserver build-runner CLI.
@@ -166,6 +184,7 @@ class BuildRunnerJob(AbstractBuildRunner):
         Returns after the build has completed/failed/cancelled or stop() has been called from another thread.
         """
         self.is_stop_requested = False
+        self.is_detach_requested = False
         self.is_running = True
         item = self.storage.build_storage.get_by_uuid(self.stored_build.uuid)
         if item is None:
@@ -306,7 +325,7 @@ class BuildRunnerJob(AbstractBuildRunner):
                 logger.info("Launching job: %s", kube_job_name)
                 resp = await self.__create_namespaced_job_with_retry(batchv1, body=body)  # type: ignore
                 logger.info("Job created: %s", kube_job_name)
-                while not self.is_stop_requested:
+                while not (self.is_stop_requested or self.is_detach_requested):
                     try:
                         job = await self.__read_namespaced_job_with_retry(
                             batchv1, kube_job_name
@@ -361,6 +380,13 @@ class BuildRunnerJob(AbstractBuildRunner):
                 # StoredBuild stays as PENDING and subsequent restarts of the watcher try to start the PENDING builds again,
                 # but fail due to a job name collision with the zombie job.
                 await self.__delete_job_and_pod_with_retry(batchv1, kube_job_name)
+            elif self.is_detach_requested:
+                # The orchestrator is shutting down: leave the job and build alone.
+                logger.info(
+                    "Detached from job %s; build %s left running",
+                    kube_job_name,
+                    build_id,
+                )
             # else the job finished normally.
 
     @retry(
