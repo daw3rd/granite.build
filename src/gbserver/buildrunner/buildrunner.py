@@ -197,12 +197,24 @@ class BuildRunner(AbstractBuildRunner):
         cancel work to __cancel_and_fail_build (see its docstring for the ordering
         and locking that keep the terminal status consistent).
 
+        If a cancellation was already requested for the build (CANCEL_REQUESTED in
+        storage), the build is CANCELLED instead of FAILED. On Kubernetes, `gb build
+        cancel` is delivered by deleting the build-runner pod, which arrives here as
+        SIGTERM; failing the build then would override the user's cancel.
+
         Args:
             failure_reason (str): reason recorded on the build for the failure.
         """
         logger.debug("BuildRunner.stop_and_fail start")
         self._stop_requested.set()
-        self.__cancel_and_fail_build(failure_reason=failure_reason)
+        if self.__is_build_cancelled():
+            logger.info(
+                "Build %s has a pending cancel request; cancelling instead of failing",
+                self.stored_build.uuid,
+            )
+            self.__cancel_build_run()
+        else:
+            self.__cancel_and_fail_build(failure_reason=failure_reason)
         logger.debug("BuildRunner.stop_and_fail end")
 
     def start_and_wait(self: Self) -> None:
@@ -1513,6 +1525,17 @@ Download : {download_msg}
         Return the updated build if the update was successful or None
         """
         if self.stored_build.status is status:
+            return None
+        if status.is_finished() and self.stored_build.status.is_finished():
+            # A terminal status is never replaced (finalize_build_status would skip
+            # it anyway); return before logging the transition or posting a
+            # misleading PR comment (e.g. "Build cancelled" on a FAILED build).
+            logger.info(
+                "Ignoring status %s for build %s: already finished as %s",
+                status,
+                self.stored_build.uuid,
+                self.stored_build.status,
+            )
             return None
         logger.info(
             "Updating status %s->%s for build %s",
