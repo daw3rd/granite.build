@@ -33,6 +33,28 @@ def test_space_config_uris_without_config_branch():
     assert cfg_uri == expected
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        f"git+ssh://{DEFAULT_GH_DOMAIN}/granite-dot-build/gb-test.git@gbspace-config",
+        f"git+ssh://{DEFAULT_GH_DOMAIN}/granite-dot-build/gb-test.git",
+        f"git+ssh://{DEFAULT_GH_DOMAIN}/granite-dot-build/gb-test.git@gbspace-config"
+        "#subdirectory=./foo",
+    ],
+)
+def test_space_config_uri_leaves_git_ssh_unmodified(uri):
+    """A git+ssh:// URI is already in config form and is returned as is.
+
+    Converting it again must not probe GitHub: parsing its path would read the
+    repo as ``gb-test.git@gbspace-config``, which 404s and invalidates the build.
+    """
+    with patch(
+        "gbserver.github.myghapi.MyGHApi",
+        side_effect=AssertionError("GitHub was queried for a git+ssh URI"),
+    ):
+        assert GitURI.get_gb_space_config_uri(uri=uri, token="some-token") == uri
+
+
 @pytest.mark.ibm
 def test_space_config_uris_with_config_branch():
     """Cases that append ``@gbspace-config`` when the branch is detected.

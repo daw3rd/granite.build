@@ -191,6 +191,11 @@ class GitURI(URI):
             return ""
         if uri.startswith("file://"):
             return uri  # Assume they are pointing to a local repository and know what their doing.
+        if uri.startswith("git+ssh://"):
+            # Already in config form (e.g. a prior result of this function). Its path
+            # may carry "@<branch>", so parsing it for the branch probe would misread
+            # the repo name (".../repo.git@gbspace-config") and fail.
+            return uri
         uri = uri.rstrip("/")  # To allow appending ".git" below.
         uriobj = urllib.parse.urlparse(uri)
         if not uriobj.path.endswith(".git"):
