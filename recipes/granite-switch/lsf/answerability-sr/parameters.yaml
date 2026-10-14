@@ -22,8 +22,7 @@ IMAGE: "nvcr.io/nvidia/pytorch:25.01-py3"
 
 # ── Code under test ──────────────────────────────────────────────────────────
 # The byoc step does an UNAUTHENTICATED `git clone`, so this must be a public
-# repo. shadow-residual on github.com is public; the github.ibm.com mirror of
-# the same name is both auth-walled and ~6 weeks stale, so do not repoint here.
+# repo. shadow-residual on github.com is public. 
 SR_REPO: "https://github.com/generative-computing/shadow-residual"
 # Pin a SHA or tag for reproducibility. `main` tracks the stock-PEFT API this
 # recipe's generated config is written against.

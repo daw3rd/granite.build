@@ -104,12 +104,8 @@ Explicitly, or with a different parameter set:
 ## Why the code is cloned from github.com
 
 The `byoc` step does an **unauthenticated** `git clone`, so the repo it clones
-must be publicly readable. That rules out both IBM-internal candidates:
-`github.ibm.com` refuses anonymous clones outright, and its
-`generative-computing/shadow-residual` mirror is in any case about six weeks
-behind the github.com repo. `SR_REPO` therefore points at github.com and should
-stay there. The base model is public on the Hub and the dependencies come from
-PyPI. The only IBM-internal inputs are the two private dataset repos.
+must be publicly readable.
+The base model is public on the Hub and the dependencies come from PyPI. 
 
 Pin `SR_REF` to a tag or SHA for anything you intend to compare against later.
 `main` is the default because that is the branch whose API the generated config
