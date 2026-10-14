@@ -129,7 +129,7 @@ assetstores:
       # two in step if shared_workdir moves.
       - mode: default
         config:
-          cache_path: /proj/data-eng/llmb-read-write/builds/hf_cache
+          cache_path: /proj/data-eng/llmb-read-write/hf_cache
     push:
       - mode: default
         config: {}
