@@ -57,6 +57,10 @@ def test_space_config_uri_leaves_git_ssh_with_branch_unmodified(uri):
         assert GitURI.get_gb_space_config_uri(uri=uri, token="some-token") == uri
 
 
+# "live" only opts out of the conftest's mock-mode stub of GitURI.__get_config_branch,
+# which would otherwise replace the very lookup under test; MyGHApi is patched below,
+# so no GitHub call is made in any mode.
+@pytest.mark.live("github")
 @pytest.mark.parametrize(
     "branch_present, expected",
     [(True, f"{_GB_TEST_SSH}@gbspace-config"), (False, _GB_TEST_SSH)],
