@@ -14,30 +14,30 @@
 
 """The build-runner pod gets the configured grace period between SIGTERM and SIGKILL.
 
-`gb build cancel` deletes the build-runner pod. The runner then needs time to tear
-down its workload and finalize the build as CANCELLED (issue #426). Too short a grace
-period leaves the build CANCEL_REQUESTED. Both places that set it must use
-BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS: the pod spec in the Job template, and the
-explicit pod delete in BuildRunnerJob. A shorter grace on that delete would override
-the pod spec.
-
-Asserted against the template and source, not a live ``BuildRunnerJob``, whose
-constructor reads config off disk and resolves an image tag.
+`gb build cancel` deletes the build-runner pod. The runner records CANCELLED right
+after SIGTERM, but it then needs time to tear down its workload (e.g. helm uninstall);
+too short a grace period orphans that workload. Both places that set the grace must
+use BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS: the pod spec in the Job template, and
+the explicit pod delete in BuildRunnerJob. A shorter grace on that delete would
+override the pod spec.
 """
 
-import ast
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import yaml
+from libgbtest.constants import HAS_K8S, requires_k8s
 
 from gbserver.types.constants import BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS
 from gbserver.utils.template import fill_template
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_BUILDRUNNERJOB = (
-    _REPO_ROOT / "src" / "gbserver" / "buildrunnerjob" / "buildrunnerjob.py"
-)
-_TEMPLATE = _REPO_ROOT / "k8s" / "dep-build-runner.yaml"
+if HAS_K8S:  # buildrunnerjob imports kubernetes_asyncio at module level
+    from gbserver.buildrunnerjob import buildrunnerjob as brj_mod
+    from gbserver.buildrunnerjob.buildrunnerjob import BuildRunnerJob
+
+_TEMPLATE = Path(__file__).resolve().parents[3] / "k8s" / "dep-build-runner.yaml"
 
 # Every value the template requires (see its "Required:" header), so strict
 # rendering fails if the template grows a variable this test doesn't supply.
@@ -71,23 +71,64 @@ def test_template_sets_termination_grace_period():
     )
 
 
-def test_pod_delete_uses_configured_grace_period():
-    """Every grace_period_seconds passed in BuildRunnerJob is the shared constant.
+class _FakeApiClient:
+    """Async context manager standing in for the kubernetes ApiClient."""
 
-    A literal (like the former 5s) on the explicit pod delete would cut the pod
-    spec's grace short and SIGKILL the runner mid-cancel.
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeCoreV1Api:
+    """Records the pod deletions BuildRunnerJob requests.
+
+    Args:
+        pod_names: names of the pods the label selector should match.
     """
-    tree = ast.parse(_BUILDRUNNERJOB.read_text(encoding="utf-8"))
-    grace_values = [
-        kw.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        for kw in node.keywords
-        if kw.arg == "grace_period_seconds"
-    ]
-    assert grace_values, "no grace_period_seconds found in buildrunnerjob.py"
-    for value in grace_values:
-        assert (
-            isinstance(value, ast.Name)
-            and value.id == "BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS"
-        ), f"grace_period_seconds is not the shared constant: {ast.dump(value)}"
+
+    def __init__(self, pod_names: list[str]):
+        self.pod_names = pod_names
+        self.deletes: list[tuple[str, object]] = []
+
+    async def list_namespaced_pod(self, namespace, label_selector):
+        return SimpleNamespace(
+            items=[
+                SimpleNamespace(metadata=SimpleNamespace(name=n))
+                for n in self.pod_names
+            ]
+        )
+
+    async def delete_namespaced_pod(self, name, namespace, body):
+        self.deletes.append((name, body))
+
+
+@requires_k8s
+def test_pod_delete_uses_configured_grace_period(monkeypatch):
+    """Each runner pod is deleted with the configured grace, not a shorter one.
+
+    A shorter grace on this explicit delete (like the former hardcoded 5s) would cut
+    the pod spec's grace short and SIGKILL the runner during workload teardown.
+    """
+    core = _FakeCoreV1Api(["gb-build-runner-x-abcde", "gb-build-runner-x-fghij"])
+
+    async def _create_api_client(**_kwargs):
+        return _FakeApiClient()
+
+    monkeypatch.setattr(
+        brj_mod.AtomicApiClient, "create_api_client", _create_api_client
+    )
+    monkeypatch.setattr(brj_mod.client, "CoreV1Api", lambda api: core)
+    runner = BuildRunnerJob.__new__(BuildRunnerJob)  # skip the config-reading __init__
+    runner.namespace = "test-ns"
+
+    asyncio.run(
+        runner._BuildRunnerJob__delete_pods_by_label_with_retry(
+            "granite-dot-build/build-id=x"
+        )
+    )
+
+    assert [name for name, _ in core.deletes] == core.pod_names
+    for _, body in core.deletes:
+        assert body.grace_period_seconds == BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS

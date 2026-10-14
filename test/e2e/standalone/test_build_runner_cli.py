@@ -345,9 +345,8 @@ class TestBuildRunnerCliSignals(AbstractSingletonStorageUsingTest):
     def test_cli_sigterm_after_cancel_request_cancels_build(self, tmp_path):
         """SIGTERM on a CANCEL_REQUESTED build marks it CANCELLED, exit 0.
 
-        Regression for issue #426: on Kubernetes, `gb build cancel` sets
-        CANCEL_REQUESTED and then deletes the build-runner pod, so the runner sees
-        SIGTERM. It must honor the pending cancel rather than mark the build FAILED.
+        On Kubernetes, `gb build cancel` sets CANCEL_REQUESTED and then deletes the
+        build-runner pod, so the runner sees SIGTERM. It must honor the pending cancel rather than mark the build FAILED.
         Delivering SIGTERM before the runner's own (monitoring_interval-paced)
         cancel poll reproduces that race. The log marker check proves the SIGTERM
         path (not that poll) produced the CANCELLED status.

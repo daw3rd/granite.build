@@ -827,9 +827,9 @@ BUILDRUNNERJOB_CONFIGMAP_NAME = os.getenv(
     ENV_VAR_BUILDRUNNERJOB_CONFIGMAP_NAME, "granite-dot-build-configmap"
 )
 # Seconds a build-runner pod gets between SIGTERM and SIGKILL when it is deleted
-# (e.g. by `gb build cancel`). It must cover workload teardown and finalizing the
-# build, its targets/steps/artifacts and the PR comment; if the runner is killed
-# first, the build is left CANCEL_REQUESTED and the workload may be orphaned.
+# (e.g. by `gb build cancel`). The runner records the final build status right after
+# SIGTERM; this mainly covers tearing down the workload (e.g. helm uninstall) on the
+# build thread. If the runner is killed first, that workload may be orphaned.
 BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS = int(
     os.getenv(ENV_VAR_BUILDRUNNERJOB_TERMINATION_GRACE_SECONDS, "60"), base=10
 )
