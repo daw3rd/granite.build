@@ -120,9 +120,16 @@ config:
 assetstores:
   - store_uri: space://assetstores/hf
     pull:
+      # cache_path must be on the shared /proj FS. hfpull runs as its own LSF
+      # job, usually on a different host from the step that reads the
+      # snapshot, so a node-local cache such as /tmp would leave the consuming
+      # step with an empty binding. The shared cache also keeps large models
+      # across runs instead of re-downloading them. This is the same path the
+      # default would give (${shared_workdir}/hf_cache), spelled out; keep the
+      # two in step if shared_workdir moves.
       - mode: default
         config:
-          cache_path: /tmp/hf_cache
+          cache_path: /proj/data-eng/llmb-read-write/builds/hf_cache
     push:
       - mode: default
         config: {}

@@ -13,9 +13,17 @@
 # through stock PEFT. Both targets run the same base model; they must, or the
 # adapter is attached to a different graph than it was trained on.
 #
+# Every artifact is an hf:// URI — the base model, both datasets, the adapter
+# and the report — so the recipe names no filesystem path on BlueVela.
+# granite.build queues an hfpull step ahead of each target for its hf://
+# inputs and an hfpush step after it for each hf:// output; the pulled copies
+# land in the environment's shared HF cache, so the ~16 GB base model is
+# downloaded once and reused by later runs. Pushing to and pulling from the
+# private repos needs an HF_TOKEN secret in the space with write access to the
+# output org.
+#
 # Nothing is installed from an IBM-internal source: the step clones over
-# unauthenticated git, so the repo is the github.com one, and the base model
-# comes from the public Hub. Only the two data paths are internal.
+# unauthenticated git, so the repo is the github.com one.
 #
 # Values come from parameters.yaml beside this file; the comments explaining WHY
 # each value is what it is live there.
@@ -35,22 +43,25 @@ granite.build:
     train:
       environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
-        # env:// means "already on a filesystem this environment can reach", so
-        # the pull is a no-op: this adds an input artifact and no extra step.
-        # Declaring it as an input rather than hardcoding the path in the
-        # command is what puts the dataset in `gb build status` and in the
+        # Each hf:// input gets an hfpull step ahead of the target, and its
+        # binding.path is the local snapshot directory the command reads.
+        # Declaring the base model and the data as inputs rather than naming
+        # them in the command is what puts them in `gb build status` and in the
         # lineage record, so the trainer's arguments and the lineage cannot
         # disagree.
+        base_model:
+          uri: "$${BASE_MODEL_URI}"
+          type: model
         train_data:
-          uri: "env://$${TRAIN_DATA_DIR}"
+          uri: "$${TRAIN_DATA_URI}"
           type: dataset
       outputs:
         # The adapter directory, registered by the command's
-        # GB_ARTIFACT_ID:adapter marker. `uri` is templated against that
-        # event's payload, so {{ binding.path }} resolves to the run-specific
-        # directory the step actually wrote rather than a parent.
+        # GB_ARTIFACT_ID:adapter marker and pushed by an hfpush step to a
+        # private repo. The run-specific {{ binding.path }} hash keeps repeat
+        # runs from overwriting one another.
         adapter:
-          uri: "env://{{ binding.path }}"
+          uri: "hf:///$${ADAPTER_REPO}-{{ binding.path | short_hash }}"
           type: model
       steps:
         - step_uri: space://steps/byoc
@@ -85,20 +96,22 @@ granite.build:
                 WORKROOT="$(pwd)";
                 OUT="$WORKROOT/adapter";
                 CFG="$WORKROOT/sr_answerability.yaml";
+                BASE="{{ bindings.base_model.binding.path }}";
                 TRAIN_DIR="{{ bindings.train_data.binding.path }}";
-                export HF_HOME="$${HF_HOME_DIR}";
+                export HF_HOME="$WORKROOT/hf_home";
                 export PYTHONUNBUFFERED=1;
                 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True;
                 echo "=== inputs ===";
                 id -un; nvidia-smi -L || true;
-                ls -la "$TRAIN_DIR" || true;
+                ls -la "$BASE" "$TRAIN_DIR" || true;
+                test -f "$BASE/config.json" || { echo "ERROR: no config.json under $BASE"; exit 1; };
                 for f in "$TRAIN_DIR/train.jsonl" "$TRAIN_DIR/test.jsonl"; do
-                test -f "$f" || { echo "ERROR: missing $f — export the messages-JSONL first; see this recipe's README, 'Before the first run'"; exit 1; };
+                test -f "$f" || { echo "ERROR: missing $f — publish the messages-JSONL first; see this recipe's README, 'Before the first run'"; exit 1; };
                 done;
                 mkdir -p "$OUT";
                 printf '%s\n'
                 'model:'
-                '  base: $${BASE_MODEL}'
+                "  base: $BASE"
                 'data:'
                 "  train_path: $TRAIN_DIR/train.jsonl"
                 "  val_path: $TRAIN_DIR/test.jsonl"
@@ -163,15 +176,20 @@ granite.build:
       inputs:
         # The adapter train produced. Binding it rather than naming a path is
         # what sequences the two targets and records the lineage edge.
+        # It is pulled back from the repo train pushed it to.
         adapter:
           binding: train.adapter
+        # The same base model train used, served from the same shared cache.
+        base_model:
+          uri: "$${BASE_MODEL_URI}"
+          type: model
         eval_data:
-          uri: "env://$${EVAL_DATASET_DIR}"
+          uri: "$${EVAL_DATA_URI}"
           type: dataset
       outputs:
         # result_df.csv (per-row predictions) + eval_summary.{jsonl,md,csv}.
         report:
-          uri: "env://{{ binding.path }}"
+          uri: "hf:///datasets/$${REPORT_REPO}-{{ binding.path | short_hash }}"
           type: dataset
       steps:
         - step_uri: space://steps/byoc
@@ -195,9 +213,10 @@ granite.build:
                 set -e;
                 WORKROOT="$(pwd)";
                 OUT="$WORKROOT/report";
+                BASE="{{ bindings.base_model.binding.path }}";
                 ADAPTER="{{ bindings.adapter.binding.path }}";
                 EVAL_DIR="{{ bindings.eval_data.binding.path }}";
-                export HF_HOME="$${HF_HOME_DIR}";
+                export HF_HOME="$WORKROOT/hf_home";
                 export PYTHONUNBUFFERED=1;
                 echo "=== inputs ===";
                 id -un; nvidia-smi -L || true;
@@ -209,7 +228,7 @@ granite.build:
                 echo "=== evaluating ===";
                 python -m shadow_residual.eval.answerability_eval
                 --mode peft
-                --base-model "$${BASE_MODEL}"
+                --base-model "$BASE"
                 --adapter-path "$ADAPTER"
                 --adapter-sub-path .
                 --dataset-path "$EVAL_DIR"

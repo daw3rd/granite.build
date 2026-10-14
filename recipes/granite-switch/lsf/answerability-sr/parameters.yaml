@@ -21,31 +21,42 @@ SR_REPO: "https://github.com/generative-computing/shadow-residual"
 SR_REF: "main"
 
 # ── Model ────────────────────────────────────────────────────────────────────
-# Public on the Hub, so no HF_TOKEN is needed. Must be identical in both
-# targets — eval rebuilds this same SR base before attaching the adapter.
-BASE_MODEL: "ibm-granite/granite-4.2-8b"
-
-# Shared Hub cache on /proj, so the ~16 GB of base weights are pulled once
-# rather than per run. Left unset the cache would land in the functional ID's
-# $HOME.
-HF_HOME_DIR: "/proj/data-eng/llmb-read-write/hfcache"
+# Public on the Hub. Both targets pull it as an input, and the command hands
+# the pulled directory to sr-train / answerability_eval as a local path. It is
+# one parameter on purpose: eval rebuilds this same SR base before attaching
+# the adapter, so the two targets must not drift apart. The environment's
+# shared HF cache keeps the ~16 GB of weights across runs, so only the first
+# run downloads them.
+BASE_MODEL_URI: "hf:///ibm-granite/granite-4.2-8b"
 
 # ── Data ─────────────────────────────────────────────────────────────────────
-# CONFIRM THIS BEFORE THE FIRST RUN. Directory holding train.jsonl + test.jsonl
-# in shadow-residual's {"messages": [...]} JSONL format. This is NOT one of the
-# dirs already on /proj: the answerability training data exists there as raw
-# classification JSONL (train_data/) and as tokenized parquet
-# (train_data_parquet/), and sr-train reads neither. The messages-JSONL has to
-# be exported once from intrinsics_training — see README.md, "Before the first
-# run". Point this at wherever that export landed.
-TRAIN_DATA_DIR: "/proj/dmfexp/8cc/data/answerability/jsonl/granite-4.2-8b"
+# PLACEHOLDERS: replace my-hf-org here and in the two output repos below with
+# an HF user or org your token can read from and create repos in. These are
+# HF dataset repos, normally private, so the space's HF_TOKEN must be able to
+# read them.
+#
+# Training data: a dataset repo with train.jsonl + test.jsonl at its root, in
+# shadow-residual's {"messages": [...]} JSONL format. It has to be exported
+# once from intrinsics_training and uploaded; see README.md, "Before the first
+# run". The files must sit at the repo root: the pull fetches the whole repo
+# and binds its root, so a path inside the repo is not honoured.
+TRAIN_DATA_URI: "hf:///datasets/my-hf-org/answerability-sr-train-granite-4.2-8b"
 
-# Eval dataset directory, used as-is. The layout answerability_eval.py expects
+# Eval data: a dataset repo holding the layout answerability_eval.py expects
 # (gold.jsonl, rag.jsonl, unanswerable_v2.{a,b,c}.jsonl + collection.txt and
-# setting.txt) is exactly what this directory already holds — it is the
-# provenance intrinsics_training records for its own bundled copy, so no export
-# step is needed on the eval side.
-EVAL_DATASET_DIR: "/proj/dmfexp/8cc/data/answerability/test_data"
+# setting.txt) at its root, uploaded unchanged from the answerability
+# test_data/ directory.
+EVAL_DATA_URI: "hf:///datasets/my-hf-org/answerability-eval"
+
+# ── Outputs ──────────────────────────────────────────────────────────────────
+# <org>/<repo-prefix> for the two pushed artifacts. The build appends a
+# per-run hash, so each run gets its own private repo, e.g.
+# my-hf-org/answerability-sr-granite-4.2-8b-1a2b3c4d. The report is a
+# dataset repo; the adapter is a model repo. If the org is an HF Enterprise
+# org listed in the hf asset store's enterprise_organizations, the push also
+# attaches the space's gbspace-<space> resource group; otherwise none is used.
+ADAPTER_REPO: "my-hf-org/answerability-sr-granite-4.2-8b"
+REPORT_REPO: "my-hf-org/answerability-sr-granite-4.2-8b-eval"
 
 # ── Adapter geometry ─────────────────────────────────────────────────────────
 # rank 16 / alpha 32 / dropout 0.05, from intrinsics_training's
