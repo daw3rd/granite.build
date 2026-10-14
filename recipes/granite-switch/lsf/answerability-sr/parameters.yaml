@@ -5,11 +5,20 @@
 ENVIRONMENT_URI: "space://environments/skypilot/lsf/ibm-bluevela"
 
 # Public container image both targets run in. Pinned (not :latest) so a run is
-# reproducible. torch 2.6 + CUDA 12.4 is the pairing the shadow-residual repo
-# documents for its own GPU runs, and python 3.11 sits inside the package's
-# requires-python (>=3.10,<3.14). The step renders this as SkyPilot
-# `docker:<image>`; BlueVela runs it under enroot.
-IMAGE: "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
+# reproducible. The step renders this as SkyPilot `docker:<image>`; BlueVela
+# runs it under enroot.
+#
+# The image MUST ship git: byoc's setup runs `git clone` / `git checkout`
+# inside the container before setup_command, so there is no chance to install
+# it first. That rules out pytorch/pytorch:*-runtime, whose final stage
+# installs only ca-certificates and libjpeg/libpng (exit 127 at the clone).
+# NGC PyTorch 25.01 installs git, ships torch 2.6 (2.6.0a0, satisfying
+# shadow-residual's torch>=2.4), CUDA 12.8 and python 3.12 (inside the
+# package's requires-python >=3.10,<3.14), sets no pip constraints file, and
+# sets PIP_BREAK_SYSTEM_PACKAGES=1 so the setup's `pip install` works. It is
+# pulled anonymously from nvcr.io, but is large (~10 GB compressed), so the
+# first pull onto BlueVela is slow.
+IMAGE: "nvcr.io/nvidia/pytorch:25.01-py3"
 
 # ── Code under test ──────────────────────────────────────────────────────────
 # The byoc step does an UNAUTHENTICATED `git clone`, so this must be a public

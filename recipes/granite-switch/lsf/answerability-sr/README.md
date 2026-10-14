@@ -228,3 +228,11 @@ would not.
   eval set outlives the default 30-minute timeout.
 - **No dependency caching.** `byoc` installs from PyPI on every run; the image
   supplies torch and CUDA, so this is a couple of minutes, not a rebuild.
+
+## Choosing a different image
+
+`byoc` runs `git clone` inside the container before `setup_command`, so any
+`IMAGE` must already contain git. The default, `nvcr.io/nvidia/pytorch:25.01-py3`,
+does. The `pytorch/pytorch:*-runtime` images do not, and fail at the clone
+with exit 127 before training starts. The image must also supply a CUDA build
+of torch 2.4 or later and Python 3.10–3.13.
