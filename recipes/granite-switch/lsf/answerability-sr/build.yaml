@@ -102,7 +102,7 @@ granite.build:
                 export PYTHONUNBUFFERED=1;
                 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True;
                 echo "=== inputs ===";
-                id -un; nvidia-smi -L || true;
+                id -un || true; nvidia-smi -L || true;
                 ls -la "$BASE" "$TRAIN_DIR" || true;
                 test -f "$BASE/config.json" || { echo "ERROR: no config.json under $BASE"; exit 1; };
                 for f in "$TRAIN_DIR/train.jsonl" "$TRAIN_DIR/test.jsonl"; do
@@ -219,7 +219,7 @@ granite.build:
                 export HF_HOME="$WORKROOT/hf_home";
                 export PYTHONUNBUFFERED=1;
                 echo "=== inputs ===";
-                id -un; nvidia-smi -L || true;
+                id -un || true; nvidia-smi -L || true;
                 ls -la "$ADAPTER" || true;
                 ls -la "$EVAL_DIR" || true;
                 test -f "$ADAPTER/adapter_config.json" || { echo "ERROR: no adapter_config.json under $ADAPTER"; exit 1; };
