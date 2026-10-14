@@ -16,8 +16,10 @@
 
 The build-runner pod outlives the watcher, so ``on_build_orchestrator_shutdown()`` must
 stop monitoring the job without marking the build CANCEL_REQUESTED or deleting the
-job/pod. ``stop()`` (a user cancel) must still do both. The Kubernetes calls and the
-admin storage are faked; ``__start_job``'s own control flow is what is under test.
+job/pod. ``stop()`` (a user cancel) must still do both. Either request can arrive
+before the build thread reaches ``start_and_wait()``; it must not be lost. The
+Kubernetes calls and the admin storage are faked; the runner's own control flow is
+what is under test.
 """
 
 import asyncio
@@ -134,3 +136,50 @@ def test_stop_still_cancels_and_deletes_job(monkeypatch):
 
     assert recorder.status_updates == [Status.CANCEL_REQUESTED]
     assert recorder.deleted_jobs == ["gb-build-runner-x"]
+
+
+def _unstarted_job_runner(monkeypatch) -> tuple["BuildRunnerJob", list]:
+    """A BuildRunnerJob whose thread has not yet reached start_and_wait().
+
+    Creating the job fails the test, and finalize_build_status calls are recorded.
+
+    Returns:
+        The runner and the list of statuses passed to finalize_build_status.
+    """
+    finalized: list = []
+    monkeypatch.setattr(
+        brj_mod,
+        "finalize_build_status",
+        lambda build_id, status, **_kw: finalized.append(status),
+    )
+    runner = BuildRunnerJob.__new__(BuildRunnerJob)
+    runner.stored_build = SimpleNamespace(uuid=BUILD_ID)
+    runner.is_stop_requested = False
+    runner.is_detach_requested = False
+    runner.is_running = False
+
+    async def _no_job():
+        pytest.fail("a job was created after the request arrived")
+
+    runner._BuildRunnerJob__start_job = _no_job
+    return runner, finalized
+
+
+def test_shutdown_before_start_creates_no_job(monkeypatch):
+    """An early shutdown is kept: no job, and the build is left for the next watcher."""
+    runner, finalized = _unstarted_job_runner(monkeypatch)
+
+    runner.on_build_orchestrator_shutdown()
+    runner.start_and_wait()
+
+    assert finalized == [], "the build should stay PENDING for the next watcher"
+
+
+def test_stop_before_start_creates_no_job_and_cancels(monkeypatch):
+    """An early user cancel is kept: no job, and the build is marked CANCELLED."""
+    runner, finalized = _unstarted_job_runner(monkeypatch)
+
+    runner.stop()
+    runner.start_and_wait()
+
+    assert finalized == [Status.CANCELLED]

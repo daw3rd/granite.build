@@ -150,12 +150,10 @@ class BuildRunnerJob(AbstractBuildRunner):
         """
         Stop the build that was started using start_and_wait().
         Upon returning, this must also cause the call to start_and_wait() to return.
+        A stop that arrives before start_and_wait() runs is kept, so no job is
+        created and the build is marked CANCELLED.
         """
-        if self.is_running:
-            self.is_stop_requested = True
-            # while self.is_running:
-            #     time.sleep(1)
-            # self.is_stop_requested = False
+        self.is_stop_requested = True
 
     def on_build_orchestrator_shutdown(self: Self) -> None:
         """Stop monitoring the build-runner job and leave the build running.
@@ -163,14 +161,15 @@ class BuildRunnerJob(AbstractBuildRunner):
         The runner pod reports its own status to admin storage and does not depend
         on the watcher, so its build is not cancelled. start_and_wait() returns
         within about one monitoring interval, without marking the build
-        CANCEL_REQUESTED or deleting the job/pod (contrast stop()).
+        CANCEL_REQUESTED or deleting the job/pod (contrast stop()). If it arrives
+        before start_and_wait() runs, no job is created and the build is left
+        PENDING for the next watcher to dispatch.
         """
-        if self.is_running:
-            logger.info(
-                "Detaching from build-runner job for build %s; leaving it running",
-                self.stored_build.uuid,
-            )
-            self.is_detach_requested = True
+        logger.info(
+            "Detaching from build-runner job for build %s; leaving it running",
+            self.stored_build.uuid,
+        )
+        self.is_detach_requested = True
 
     def start_and_wait(self: Self) -> None:
         """
@@ -183,8 +182,11 @@ class BuildRunnerJob(AbstractBuildRunner):
             5) gh_api_endpoint (cli option)
         Returns after the build has completed/failed/cancelled or stop() has been called from another thread.
         """
-        self.is_stop_requested = False
-        self.is_detach_requested = False
+        # The stop/detach flags are not reset here: each dispatch uses a new runner
+        # (initialized in __init__), and a request that arrived before this thread got
+        # here must not be lost.
+        if self.__handled_request_before_start():
+            return
         self.is_running = True
         item = self.storage.build_storage.get_by_uuid(self.stored_build.uuid)
         if item is None:
@@ -201,6 +203,28 @@ class BuildRunnerJob(AbstractBuildRunner):
                 self.stored_build.uuid, Status.FAILED, failure_reason=str(e)
             )
         self.is_running = False
+
+    def __handled_request_before_start(self: Self) -> bool:
+        """Honor a stop() or orchestrator shutdown that arrived before the job exists.
+
+        Returns:
+            bool: True if a request was handled and no job should be created: after a
+                stop() the build is marked CANCELLED; after a shutdown it is left
+                PENDING for the next watcher to dispatch. False otherwise.
+        """
+        build_id = self.stored_build.uuid
+        if self.is_stop_requested:
+            logger.info("Build %s stopped before its job was created", build_id)
+            finalize_build_status(build_id, Status.CANCELLED)
+            return True
+        if self.is_detach_requested:
+            logger.info(
+                "Orchestrator shut down before the job for build %s was created; "
+                "leaving the build for the next watcher",
+                build_id,
+            )
+            return True
+        return False
 
     def __get_command_to_run(
         self: Self, sleep_on_end: bool = BUILDRUNNERJOB_SLEEP_ON_END

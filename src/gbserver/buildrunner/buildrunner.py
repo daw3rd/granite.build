@@ -242,6 +242,15 @@ class BuildRunner(AbstractBuildRunner):
 
         try:
             while True:
+                # A stop()/stop_and_fail() that arrived before this thread got here
+                # already recorded the final status; don't start a run it would only
+                # have to cancel.
+                if self._stop_requested.is_set():
+                    logger.info(
+                        "Build %s was stopped before its run started; not running it",
+                        self.stored_build.uuid,
+                    )
+                    break
                 if self.stored_build.status == Status.FAILED:
                     logger.info(
                         "Build %s is already FAILED; skipping run and proceeding to retry",
