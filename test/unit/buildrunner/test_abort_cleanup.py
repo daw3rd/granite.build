@@ -25,117 +25,201 @@ import pytest
 from libgbtest import abort_cleanup
 from libgbtest.abort_cleanup import (
     CleanupWatchdog,
-    OneShotCleanup,
+    SerializedCleanup,
     TimeoutDeadline,
-    cap_to_timeout_deadline,
+    bounded_timeout,
+    wait_deadline,
 )
 
-# --- OneShotCleanup ---------------------------------------------------------
+# --- SerializedCleanup ------------------------------------------------------
 
 
-def test_one_shot_cleanup_runs_once():
+def test_serialized_cleanup_runs_until_closed():
     calls = []
-    cleanup = OneShotCleanup(lambda: calls.append(1))
-    assert cleanup.run("teardown") is True
+    cleanup = SerializedCleanup(lambda: calls.append(1))
+    assert cleanup.run("watchdog") is True
+    assert cleanup.run("teardown", final=True) is True
     assert cleanup.run("watchdog") is False
-    assert calls == [1]
+    assert calls == [1, 1]
 
 
-def test_one_shot_cleanup_marks_done_even_when_fn_raises():
+def test_serialized_cleanup_final_run_closes_even_when_fn_raises():
     def boom():
         raise RuntimeError("boom")
 
-    cleanup = OneShotCleanup(boom)
+    cleanup = SerializedCleanup(boom)
     with pytest.raises(RuntimeError):
-        cleanup.run("teardown")
+        cleanup.run("teardown", final=True)
     assert cleanup.run("watchdog") is False
 
 
-# --- cap_to_timeout_deadline ---------------------------------------------------
+def test_serialized_cleanup_waits_for_a_run_in_progress():
+    # Teardown must not proceed (and release storage) while the watchdog's pass
+    # is still running: its own run blocks until that pass has finished.
+    in_watchdog_pass = threading.Event()
+    release = threading.Event()
+    order = []
+
+    def fn():
+        if not in_watchdog_pass.is_set():
+            in_watchdog_pass.set()
+            release.wait(2)
+            order.append("watchdog done")
+        else:
+            order.append("teardown pass")
+
+    cleanup = SerializedCleanup(fn)
+    watchdog = threading.Thread(target=cleanup.run, args=("watchdog",))
+    watchdog.start()
+    assert in_watchdog_pass.wait(2)
+    teardown = threading.Thread(target=cleanup.run, args=("teardown", True))
+    teardown.start()
+    time.sleep(0.2)
+    assert order == []  # teardown is waiting on the lock
+    release.set()
+    watchdog.join(2)
+    teardown.join(2)
+    assert order == ["watchdog done", "teardown pass"]
 
 
-def _deadline(remaining: float) -> TimeoutDeadline:
+# --- wait_deadline / bounded_timeout ----------------------------------------
+
+
+def _deadline(remaining: float, method: str = "thread") -> TimeoutDeadline:
     return TimeoutDeadline(
         kill_at=time.monotonic() + remaining,
-        method="thread",
+        method=method,
         disable_debugger_detection=False,
     )
 
 
-def test_cap_without_deadline_returns_requested():
-    assert cap_to_timeout_deadline(1800, None, margin_seconds=120) == 1800
+def test_wait_deadline_untimed_is_none():
+    assert wait_deadline(None, margin_seconds=120) is None
+    assert bounded_timeout(1800, None) == 1800
 
 
-def test_cap_leaves_short_timeout_alone():
-    assert cap_to_timeout_deadline(600, _deadline(1200), margin_seconds=120) == 600
+def test_bounded_timeout_leaves_short_timeout_alone():
+    deadline = wait_deadline(_deadline(1200), margin_seconds=120)
+    assert bounded_timeout(600, deadline) == 600
 
 
-def test_cap_shortens_timeout_past_the_kill():
-    capped = cap_to_timeout_deadline(1800, _deadline(1200), margin_seconds=120)
-    assert 1070 <= capped <= 1080
+def test_bounded_timeout_ends_before_the_kill():
+    deadline = wait_deadline(_deadline(1200), margin_seconds=120)
+    assert 1070 <= bounded_timeout(1800, deadline) <= 1080
 
 
-def test_cap_never_goes_below_the_floor():
-    capped = cap_to_timeout_deadline(1800, _deadline(100), margin_seconds=120)
-    assert capped == abort_cleanup.MIN_BUILD_TIMEOUT_SECONDS
+def test_bounded_timeout_shares_one_deadline_across_waits():
+    # Two waits in a row cannot add up past the deadline: the second only gets
+    # what the first left.
+    deadline = time.monotonic() + 0.3
+    first = bounded_timeout(1800, deadline)
+    time.sleep(first)
+    assert bounded_timeout(1800, deadline) == pytest.approx(0, abs=0.05)
+
+
+def test_bounded_timeout_is_never_negative():
+    assert bounded_timeout(60, time.monotonic() - 5) == 0
 
 
 # --- CleanupWatchdog --------------------------------------------------------
 
 
-def test_watchdog_fires_before_the_kill():
-    fired = threading.Event()
-    cleanup = OneShotCleanup(fired.set)
-    watchdog = CleanupWatchdog(
-        _deadline(0.3), lambda: cleanup.run("watchdog"), lead_seconds=0.2
+def _watchdog(deadline, abort, cleanup):
+    return CleanupWatchdog(
+        deadline,
+        abort=abort,
+        cleanup=cleanup,
+        abort_lead_seconds=0.4,
+        cleanup_lead_seconds=0.2,
+    )
+
+
+def test_watchdog_aborts_then_cleans_up_before_the_kill():
+    order = []
+    done = threading.Event()
+    watchdog = _watchdog(
+        _deadline(0.6),
+        abort=lambda: order.append("abort"),
+        cleanup=lambda: (order.append("cleanup"), done.set()),
     )
     assert watchdog.start() is True
-    assert fired.wait(2)
-    assert cleanup.run("teardown") is False
+    assert done.wait(2)
+    assert order == ["abort", "cleanup"]
+
+
+def test_watchdog_blocked_abort_does_not_delay_cleanup():
+    unblock = threading.Event()
+    cleaned = threading.Event()
+    watchdog = _watchdog(
+        _deadline(0.6), abort=lambda: unblock.wait(5), cleanup=cleaned.set
+    )
+    watchdog.start()
+    try:
+        assert cleaned.wait(2)
+    finally:
+        unblock.set()
 
 
 def test_watchdog_cancel_prevents_firing():
     fired = threading.Event()
-    watchdog = CleanupWatchdog(_deadline(0.3), fired.set, lead_seconds=0.2)
+    watchdog = _watchdog(_deadline(0.6), abort=fired.set, cleanup=fired.set)
     watchdog.start()
     watchdog.cancel()
-    assert not fired.wait(0.5)
+    assert not fired.wait(0.8)
 
 
 def test_watchdog_not_armed_for_signal_method():
-    deadline = TimeoutDeadline(
-        kill_at=time.monotonic() + 10, method="signal", disable_debugger_detection=False
-    )
-    watchdog = CleanupWatchdog(deadline, lambda: None, lead_seconds=1)
+    watchdog = _watchdog(_deadline(10, "signal"), lambda: None, lambda: None)
     assert watchdog.start() is False
 
 
 def test_watchdog_not_armed_without_deadline():
-    watchdog = CleanupWatchdog(None, lambda: None, lead_seconds=1)
-    assert watchdog.start() is False
+    assert _watchdog(None, lambda: None, lambda: None).start() is False
 
 
-def test_watchdog_skips_cleanup_under_debugger(monkeypatch):
-    # pytest-timeout does not kill a test being debugged, so neither do we clean up.
+def test_watchdog_does_nothing_under_debugger(monkeypatch):
+    # pytest-timeout does not kill a test being debugged, so leave it alone.
     monkeypatch.setattr(abort_cleanup, "_is_debugging", lambda: True)
     fired = threading.Event()
-    watchdog = CleanupWatchdog(_deadline(0.2), fired.set, lead_seconds=0.1)
+    watchdog = _watchdog(_deadline(0.5), abort=fired.set, cleanup=fired.set)
     watchdog.start()
-    assert not fired.wait(0.5)
+    assert not fired.wait(0.8)
 
 
 # --- termination signals ----------------------------------------------------
 
 
-def test_map_and_restore_signal_handlers():
-    before = {sig: signal.getsignal(sig) for sig in abort_cleanup.TERMINATION_SIGNALS}
+@pytest.fixture
+def default_termination_handlers():
+    """Put SIGTERM / SIGHUP at their defaults for a test, then restore them."""
+    saved = {sig: signal.getsignal(sig) for sig in abort_cleanup.TERMINATION_SIGNALS}
+    for sig in saved:
+        signal.signal(sig, signal.SIG_DFL)
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
+def test_map_and_restore_signal_handlers(default_termination_handlers):
+    previous = abort_cleanup.map_termination_signals_to_sigint()
+    assert set(previous) == set(abort_cleanup.TERMINATION_SIGNALS)
+    for sig in abort_cleanup.TERMINATION_SIGNALS:
+        assert signal.getsignal(sig) is signal.default_int_handler
+    abort_cleanup.restore_signal_handlers(previous)
+    for sig in abort_cleanup.TERMINATION_SIGNALS:
+        assert signal.getsignal(sig) is signal.SIG_DFL
+
+
+def test_map_leaves_ignored_signal_alone(default_termination_handlers):
+    # nohup ignores SIGHUP; mapping it would abort the run when the terminal closes.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     previous = abort_cleanup.map_termination_signals_to_sigint()
     try:
-        for sig in abort_cleanup.TERMINATION_SIGNALS:
-            assert signal.getsignal(sig) is signal.default_int_handler
+        assert signal.SIGHUP not in previous
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+        assert signal.getsignal(signal.SIGTERM) is signal.default_int_handler
     finally:
         abort_cleanup.restore_signal_handlers(previous)
-    assert {sig: signal.getsignal(sig) for sig in before} == before
 
 
 _SIGNAL_CONFTEST = """\
@@ -261,8 +345,10 @@ MARKER = Path(os.environ["MARKER_DIR"])
 def watchdog(request):
     w = CleanupWatchdog(
         get_timeout_deadline(request.node),
-        lambda: (MARKER / "cleaned").write_text("yes"),
-        lead_seconds=1.5,
+        abort=lambda: None,  # this test cannot be aborted: it is hung
+        cleanup=lambda: (MARKER / "cleaned").write_text("yes"),
+        abort_lead_seconds=2.0,
+        cleanup_lead_seconds=1.0,
     )
     w.start()
     yield
@@ -294,3 +380,33 @@ def test_watchdog_cleans_up_before_pytest_timeout_kill(tmp_path):
     )
     assert b"Timeout" in proc.stdout + proc.stderr  # pytest-timeout did kill it
     assert (tmp_path / "cleaned").exists()
+
+
+def test_nohup_run_survives_sighup(tmp_path):
+    # Under nohup SIGHUP is ignored; the run must keep going rather than abort.
+    (tmp_path / "conftest.py").write_text(_SIGNAL_CONFTEST)
+    (tmp_path / "test_sleeps.py").write_text(_SIGNAL_TEST)
+    libgbtest_root = str(Path(abort_cleanup.__file__).resolve().parents[1])
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": libgbtest_root,
+        "MARKER_DIR": str(tmp_path),
+    }
+    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    proc = subprocess.Popen(
+        [*cmd, "--rootdir", str(tmp_path), str(tmp_path / "test_sleeps.py")],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN),
+    )
+    try:
+        _wait_for(tmp_path / "started", proc)
+        proc.send_signal(signal.SIGHUP)
+        time.sleep(1)
+        assert proc.poll() is None, "a nohup'd run was aborted by SIGHUP"
+        assert not (tmp_path / "teardown").exists()
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)

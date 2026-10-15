@@ -23,10 +23,12 @@ datasets, buildrunner pods, ...). Two kinds of abort skip it:
   handles them the way SIGINT is handled.
 * **pytest-timeout's thread method.** On timeout it dumps stacks and calls
   ``os._exit(1)``: no ``finally``, no teardown. conftest records each test's kill
-  time (:func:`record_timeout_deadline`) so a test can keep its own wait under it
-  (:func:`cap_to_timeout_deadline`), and arm a :class:`CleanupWatchdog` that runs
-  its cleanup shortly before the kill, for a test hung where it cannot fail on its
-  own (e.g. a call blocked with no read timeout).
+  time (:func:`record_timeout_deadline`) so a test can end all its waits before
+  it (:func:`wait_deadline`, :func:`bounded_timeout`), and arm a
+  :class:`CleanupWatchdog` for a test hung where it cannot fail on its own (e.g.
+  a call blocked with no read timeout). The watchdog first asks the test to
+  abort, so it fails and tears down normally, and only cleans up itself if
+  teardown has still not finished just before the kill.
 
 SIGKILL cannot be handled in-process. This module must not depend on gbserver: the
 signal tests run it in a bare pytest subprocess.
@@ -46,9 +48,6 @@ logger = logging.getLogger(__name__)
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 """Signals handled like SIGINT, so pytest runs teardown."""
 
-MIN_BUILD_TIMEOUT_SECONDS = 60.0
-"""Floor for a capped wait, so a nearly spent budget still gets a real attempt."""
-
 
 def map_termination_signals_to_sigint() -> dict[int, Any]:
     """Handle SIGTERM / SIGHUP the way SIGINT is handled, so teardown runs.
@@ -59,18 +58,22 @@ def map_termination_signals_to_sigint() -> dict[int, Any]:
     no tests, so a session fixture never reaches it, and a signalled controller
     would die at once and take its workers down without teardown.
 
+    Only signals still at their default action are mapped: one already ignored
+    (``nohup`` ignores SIGHUP) or handled by someone else is left as it is.
     Uses ``signal.default_int_handler`` itself, not SIGINT's current handler: a
     process started in the background by a non-interactive shell inherits SIGINT
     as ignored, and copying that would make SIGTERM ignored too. A no-op off the
     main thread, where Python cannot set handlers.
 
-    :returns: The previous handlers, for :func:`restore_signal_handlers`.
+    :returns: The previous handlers of the mapped signals, for
+        :func:`restore_signal_handlers`.
     """
     if threading.current_thread() is not threading.main_thread():
         return {}
     return {
         signum: signal.signal(signum, signal.default_int_handler)
         for signum in TERMINATION_SIGNALS
+        if signal.getsignal(signum) is signal.SIG_DFL
     }
 
 
@@ -126,59 +129,70 @@ def get_timeout_deadline(item: pytest.Item) -> Optional[TimeoutDeadline]:
     return item.stash.get(TIMEOUT_DEADLINE_KEY, None)
 
 
-def cap_to_timeout_deadline(
-    requested_seconds: float,
-    deadline: Optional[TimeoutDeadline],
-    margin_seconds: float,
-) -> float:
-    """Shorten a wait so it ends ``margin_seconds`` before pytest-timeout fires.
+def wait_deadline(
+    deadline: Optional[TimeoutDeadline], margin_seconds: float
+) -> Optional[float]:
+    """The absolute time by which all of a test's waits must end.
 
-    A test whose own wait outlasts pytest-timeout never fails on its own: it is
-    killed first, skipping its teardown. Capping lets the wait fail normally.
+    A test whose waits outlast pytest-timeout never fails on its own: it is
+    killed first, skipping its teardown. Ending every wait ``margin_seconds``
+    before the kill lets it fail normally, however many waits it runs in a row.
 
-    :param requested_seconds: The wait the test asked for.
     :param deadline: The test's pytest-timeout deadline, or None if untimed.
     :param margin_seconds: Time to leave for stopping the work and tearing down.
-    :returns: The wait to use, never below :data:`MIN_BUILD_TIMEOUT_SECONDS`.
+    :returns: A ``time.monotonic()`` value, or None when the test is untimed.
     """
     if deadline is None:
-        return requested_seconds
-    budget = deadline.remaining() - margin_seconds
-    if requested_seconds <= budget:
-        return requested_seconds
-    capped = max(budget, MIN_BUILD_TIMEOUT_SECONDS)
-    logger.warning(
-        "Capping the %.0fs build wait to %.0fs to finish before the pytest "
-        "timeout; raise it with @pytest.mark.timeout if the build needs longer",
-        requested_seconds,
-        capped,
-    )
-    return capped
+        return None
+    return deadline.kill_at - margin_seconds
 
 
-class OneShotCleanup:
-    """Thread-safe wrapper that runs a cleanup function at most once."""
+def bounded_timeout(timeout: float, deadline: Optional[float]) -> float:
+    """Shorten ``timeout`` so a wait starting now ends by ``deadline``.
+
+    :param timeout: The wait's own timeout, in seconds.
+    :param deadline: A :func:`wait_deadline` value, or None for no bound.
+    :returns: The timeout to use, never negative.
+    """
+    if deadline is None:
+        return timeout
+    return max(min(timeout, deadline - time.monotonic()), 0.0)
+
+
+class SerializedCleanup:
+    """Runs an idempotent cleanup from several threads, one run at a time.
+
+    The test's teardown and the :class:`CleanupWatchdog` both run it. The lock is
+    held for the whole run, so a teardown that arrives while the watchdog is part
+    way through waits for it, then runs its own pass for whatever was created
+    since. The cleanup function must therefore skip what it already deleted. The
+    final run (teardown's) closes it, so the watchdog cannot touch resources the
+    rest of teardown releases afterwards.
+    """
 
     def __init__(self, fn: Callable[[], None]):
-        """:param fn: The cleanup to run."""
+        """:param fn: The cleanup to run; must be safe to run more than once."""
         self._fn = fn
         self._lock = threading.Lock()
-        self._started = False
+        self._closed = False
 
-    def run(self, caller: str) -> bool:
-        """Run the cleanup unless it has already started.
+    def run(self, caller: str, final: bool = False) -> bool:
+        """Run the cleanup, waiting for any run already in progress.
 
         :param caller: Who is running it, for the log.
-        :returns: True if this call ran it, False if it had already started.
-        :raises Exception: Whatever the cleanup raises (it still counts as run).
+        :param final: Close it after this run, so later runs are skipped.
+        :returns: True if this call ran it, False if it was already closed.
+        :raises Exception: Whatever the cleanup raises (a final run still closes).
         """
         with self._lock:
-            if self._started:
-                logger.info("Cleanup already started; skipping it for %s", caller)
+            if self._closed:
+                logger.info("Cleanup already finished; skipping it for %s", caller)
                 return False
-            self._started = True
-        logger.info("Running test cleanup from %s", caller)
-        self._fn()
+            try:
+                logger.info("Running test cleanup from %s", caller)
+                self._fn()
+            finally:
+                self._closed = final
         return True
 
 
@@ -190,31 +204,41 @@ def _is_debugging() -> bool:
 
 
 class CleanupWatchdog:
-    """Runs a cleanup shortly before pytest-timeout's thread method kills the test.
+    """Gets a hung test cleaned up before pytest-timeout's thread method kills it.
 
     The thread method ends the process with ``os._exit``, so the test's teardown
-    never runs; this daemon timer runs the cleanup ``lead_seconds`` earlier.
+    never runs. ``abort_lead_seconds`` before the kill the watchdog calls
+    ``abort``, which should make the test fail so that its own teardown runs.
+    ``cleanup_lead_seconds`` before the kill it calls ``cleanup``, for a test that
+    could not be aborted. Each stage has its own daemon timer, so an ``abort``
+    that blocks cannot hold up the cleanup.
     """
 
     def __init__(
         self,
         deadline: Optional[TimeoutDeadline],
+        abort: Callable[[], Any],
         cleanup: Callable[[], Any],
-        lead_seconds: float,
+        abort_lead_seconds: float,
+        cleanup_lead_seconds: float,
     ):
         """
         :param deadline: The test's pytest-timeout deadline, or None if untimed.
-        :param cleanup: The cleanup to run; share a :class:`OneShotCleanup` with
-            the test's teardown so the two never both run it.
-        :param lead_seconds: How long before the kill to run the cleanup.
+        :param abort: Makes the test stop waiting and fail.
+        :param cleanup: The cleanup to run; a :class:`SerializedCleanup` shared
+            with the test's teardown, so the two never run it at once.
+        :param abort_lead_seconds: How long before the kill to call ``abort``.
+        :param cleanup_lead_seconds: How long before the kill to call ``cleanup``.
         """
         self._deadline = deadline
-        self._cleanup = cleanup
-        self._lead_seconds = lead_seconds
-        self._timer: Optional[threading.Timer] = None
+        self._stages = [
+            (abort_lead_seconds, abort, "aborting the test"),
+            (cleanup_lead_seconds, cleanup, "cleaning up"),
+        ]
+        self._timers: list[threading.Timer] = []
 
     def start(self) -> bool:
-        """Arm the timer, if pytest-timeout would kill the process.
+        """Arm the timers, if pytest-timeout would kill the process.
 
         Not armed for an untimed test or the signal method, whose timeout raises
         in the test and so already reaches teardown.
@@ -223,28 +247,35 @@ class CleanupWatchdog:
         """
         if self._deadline is None or self._deadline.method != "thread":
             return False
-        delay = max(self._deadline.remaining() - self._lead_seconds, 0.0)
-        self._timer = threading.Timer(delay, self._fire)
-        self._timer.daemon = True
-        self._timer.name = "abort-cleanup-watchdog"
-        self._timer.start()
+        for lead_seconds, fn, action in self._stages:
+            delay = max(self._deadline.remaining() - lead_seconds, 0.0)
+            timer = threading.Timer(delay, self._fire, args=(fn, action))
+            timer.daemon = True
+            timer.name = f"abort-cleanup-watchdog ({action})"
+            timer.start()
+            self._timers.append(timer)
         return True
 
     def cancel(self) -> None:
-        """Disarm the timer (a no-op if it was never armed or already fired)."""
-        if self._timer is not None:
-            self._timer.cancel()
+        """Disarm the timers (a no-op if never armed or already fired)."""
+        for timer in self._timers:
+            timer.cancel()
 
-    def _fire(self) -> None:
-        """Timer callback: clean up, as pytest-timeout is about to kill us."""
+    def _fire(self, fn: Callable[[], Any], action: str) -> None:
+        """Timer callback: run one stage, as pytest-timeout is about to kill us.
+
+        :param fn: The stage's callable.
+        :param action: What the stage does, for the log.
+        """
         assert self._deadline is not None
         if not self._deadline.disable_debugger_detection and _is_debugging():
-            return  # pytest-timeout spares a debugged test, so keep its resources.
+            return  # pytest-timeout spares a debugged test, so leave it alone.
         logger.warning(
-            "pytest-timeout fires in %.0fs and will skip teardown; cleaning up now",
+            "pytest-timeout fires in %.0fs and would skip teardown; %s",
             self._deadline.remaining(),
+            action,
         )
         try:
-            self._cleanup()
+            fn()
         except Exception:  # pylint: disable=broad-exception-caught
-            logger.exception("Watchdog cleanup failed")
+            logger.exception("Watchdog failed %s", action)
