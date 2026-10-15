@@ -29,6 +29,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, List, Optional, Self, Union
 
 import pytest
 import yaml
+from libgbtest.abort_cleanup import (
+    CleanupWatchdog,
+    OneShotCleanup,
+    cap_to_timeout_deadline,
+    get_timeout_deadline,
+)
 from libgbtest.buildrunner.placeholder import PLACEHOLDER
 from libgbtest.buildrunner.utils import (
     ExceptionRaisingThread,
@@ -88,6 +94,14 @@ from gbserver.utils.logger import get_logger
 from gbserver.utils.utils import get_time, get_uuid
 
 logger = get_logger(__name__)
+
+BUILD_WAIT_TIMEOUT_MARGIN_SECONDS = 120.0
+"""A build wait ends at least this long before pytest-timeout fires, leaving time
+to stop the build and tear down normally before the cleanup watchdog acts."""
+
+CLEANUP_WATCHDOG_LEAD_SECONDS = 60.0
+"""How long before pytest-timeout's ``os._exit`` the watchdog deletes the
+build outputs of a test too hung to reach its teardown."""
 
 
 class ExpectedStep(BaseModel):
@@ -375,6 +389,9 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
 
     def setup_method(self: Self, method):
         # breakpoint()
+        # Shared by teardown_method and the pytest-timeout watchdog, so the
+        # outputs are deleted once, by whichever gets there first.
+        self._output_cleanup = OneShotCleanup(self._delete_build_outputs)
         # HF mocking is handled entirely by the autouse `_hf_mock` fixture in
         # test/conftest.py, which is marker-aware and so honors
         # @pytest.mark.live("hf") at function, class and module scope. Gating it
@@ -402,33 +419,37 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
 
         super().setup_method(method)
 
+    @pytest.fixture(autouse=True)
+    def _arm_cleanup_watchdog(self: Self, request: pytest.FixtureRequest):
+        """Delete the build outputs before pytest-timeout can kill the test.
+
+        pytest-timeout's thread method ends the process with ``os._exit``, which
+        skips teardown_method; see libgbtest.abort_cleanup. Not armed when build
+        teardown is skipped (GBTEST_SKIP_BUILD_TEARDOWN).
+
+        Args:
+            request: The test's fixture request, for its pytest-timeout deadline.
+
+        Yields:
+            None, while the test runs; the watchdog is disarmed afterwards.
+        """
+        self._timeout_deadline = get_timeout_deadline(request.node)
+        watchdog = CleanupWatchdog(
+            self._timeout_deadline,
+            # Resolved when it fires: setup_method may run after this fixture.
+            lambda: self._output_cleanup.run("the pytest-timeout watchdog"),
+            lead_seconds=CLEANUP_WATCHDOG_LEAD_SECONDS,
+        )
+        if not GBTEST_SKIP_BUILD_TEARDOWN:
+            watchdog.start()
+        yield
+        watchdog.cancel()
+
     def teardown_method(self: Self, method):
         if GBTEST_SKIP_BUILD_TEARDOWN:
             logger.warning("skipping the teardown of the test build!")
             return
-        # Remove all the output artifacts created by the builds.
-        try:
-            builds = self.storage.build_storage.get_by_uuid(None)
-        except Exception as e:
-            logger.warning(
-                f"Could not get builds.  Skipping removal of their output artifacts. {e}"
-            )
-            builds = []
-
-        # Cleanup output artifacts
-        for build in builds:
-            try:
-                self._delete_output_artifacts(build.uuid)
-            except Exception as e:
-                logger.warning(
-                    f"Ignoring failure to delete 1 or more output artifacts for build {build.uuid}: {e}"
-                )
-
-        # Clean up left over pods/jobs
-        # breakpoint()
-        if self._uses_buildrunner_pods():
-            for build in builds:
-                delete_buildrunner_pod(build.uuid)
+        self._output_cleanup.run("teardown")
 
         if not self.was_logged_in and not is_pytest_running_parallel():
             # When a developer is running locally with existing login, we don't want to log them out.
@@ -488,6 +509,33 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
             space.git_repo_uri = test_spec.space_uri
             self.storage.space_storage.update(space)
         return space
+
+    def _delete_build_outputs(self: Self) -> None:
+        """Delete every build's output artifacts and leftover buildrunner pods.
+
+        Run once per test, by teardown_method or, when pytest-timeout is about to
+        kill a hung test, by the cleanup watchdog. Failures are logged, not raised.
+        """
+        try:
+            builds = self.storage.build_storage.get_by_uuid(None)
+        except Exception as e:
+            logger.warning(
+                f"Could not get builds.  Skipping removal of their output artifacts. {e}"
+            )
+            builds = []
+
+        for build in builds:
+            try:
+                self._delete_output_artifacts(build.uuid)
+            except Exception as e:
+                logger.warning(
+                    f"Ignoring failure to delete 1 or more output artifacts for build {build.uuid}: {e}"
+                )
+
+        # Clean up left over pods/jobs
+        if self._uses_buildrunner_pods():
+            for build in builds:
+                delete_buildrunner_pod(build.uuid)
 
     def _delete_output_artifacts(self: Self, build_id: str):
         """Delete all output artifacts created by a build from their remote stores.
@@ -584,7 +632,13 @@ class AbstractBuildTest(AbstractSingletonStorageUsingPreloadedSpaceTest):
             targets=test_spec.targets,
         )
         logger.info(f"Done creating the build")
-        timeout_seconds = build_count * test_spec.timeout_minutes * 60
+        # Kept under pytest-timeout so a slow build fails here, through the normal
+        # stop-and-teardown path, rather than being killed without teardown.
+        timeout_seconds = cap_to_timeout_deadline(
+            build_count * test_spec.timeout_minutes * 60,
+            getattr(self, "_timeout_deadline", None),
+            margin_seconds=BUILD_WAIT_TIMEOUT_MARGIN_SECONDS,
+        )
 
         if test_spec.simulate_step_failure:
             enable_failure_simulation()
