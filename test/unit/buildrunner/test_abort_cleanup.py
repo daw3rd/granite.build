@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any, Optional, Sequence
 
 import pytest
 from libgbtest import abort_cleanup
@@ -86,6 +87,12 @@ def test_serialized_cleanup_waits_for_a_run_in_progress():
 
 
 def _deadline(remaining: float, method: str = "thread") -> TimeoutDeadline:
+    """A pytest-timeout deadline that fires ``remaining`` seconds from now.
+
+    :param remaining: Seconds until the simulated timeout fires.
+    :param method: The pytest-timeout method it simulates.
+    :returns: The deadline.
+    """
     return TimeoutDeadline(
         kill_at=time.monotonic() + remaining,
         method=method,
@@ -125,6 +132,13 @@ def test_bounded_timeout_is_never_negative():
 
 
 def _watchdog(deadline, abort, cleanup):
+    """A watchdog that aborts 0.4s and cleans up 0.2s before ``deadline``.
+
+    :param deadline: The simulated pytest-timeout deadline, or None.
+    :param abort: The abort stage's callable.
+    :param cleanup: The cleanup stage's callable.
+    :returns: The (unstarted) watchdog.
+    """
     return CleanupWatchdog(
         deadline,
         abort=abort,
@@ -250,31 +264,64 @@ class TestSleeps:
 """
 
 
-def _run_and_signal(
-    tmp_path: Path, signum: int, extra_args: list[str], hang_teardown: bool = False
-) -> int:
-    """Run a sleeping pytest session, signal it once started, return its rc.
+def _start_pytest(
+    tmp_path: Path,
+    conftest: str,
+    test_source: str,
+    extra_args: Sequence[str] = (),
+    extra_env: Optional[dict[str, str]] = None,
+    **popen_kwargs: Any,
+) -> subprocess.Popen:
+    """Start a bare pytest run of a one-file test session in ``tmp_path``.
 
-    When ``hang_teardown`` is set, a second ``signum`` is sent after teardown
-    starts, to check that it still ends the run.
+    The session sees only libgbtest (not the repo's conftest), and the test can
+    write marker files to ``$MARKER_DIR`` (``tmp_path``) for the caller to check.
+
+    :param tmp_path: Directory for the session's files and markers.
+    :param conftest: Source of the session's conftest.py.
+    :param test_source: Source of its single test file, test_session.py.
+    :param extra_args: More pytest arguments.
+    :param extra_env: More environment variables for the run.
+    :param popen_kwargs: Overrides for ``subprocess.Popen`` (output is discarded
+        by default).
+    :returns: The running pytest process.
     """
-    (tmp_path / "conftest.py").write_text(_SIGNAL_CONFTEST)
-    (tmp_path / "test_sleeps.py").write_text(_SIGNAL_TEST)
-    libgbtest_root = str(Path(abort_cleanup.__file__).resolve().parents[1])
+    (tmp_path / "conftest.py").write_text(conftest)
+    test_file = tmp_path / "test_session.py"
+    test_file.write_text(test_source)
     env = {
         "PATH": "/usr/bin:/bin",
-        "PYTHONPATH": libgbtest_root,
+        "PYTHONPATH": str(Path(abort_cleanup.__file__).resolve().parents[1]),
         "MARKER_DIR": str(tmp_path),
-        **({"HANG_TEARDOWN": "1"} if hang_teardown else {}),
+        **(extra_env or {}),
     }
     cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
     cmd += ["-p", "no:randomly", "--rootdir", str(tmp_path), *extra_args]
-    proc = subprocess.Popen(
-        [*cmd, str(tmp_path / "test_sleeps.py")],
-        cwd=tmp_path,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    popen_kwargs.setdefault("stdout", subprocess.DEVNULL)
+    popen_kwargs.setdefault("stderr", subprocess.DEVNULL)
+    return subprocess.Popen(
+        [*cmd, str(test_file)], cwd=tmp_path, env=env, **popen_kwargs
+    )
+
+
+def _run_and_signal(
+    tmp_path: Path, signum: int, extra_args: list[str], hang_teardown: bool = False
+) -> int:
+    """Run a sleeping pytest session and signal it once its test has started.
+
+    :param tmp_path: Directory for the session's files and markers.
+    :param signum: The signal to send.
+    :param extra_args: More pytest arguments (e.g. ``-n 1`` for xdist).
+    :param hang_teardown: Make teardown hang and send ``signum`` again once it
+        starts, to check that the second signal still ends the run.
+    :returns: The pytest process's exit code.
+    """
+    proc = _start_pytest(
+        tmp_path,
+        _SIGNAL_CONFTEST,
+        _SIGNAL_TEST,
+        extra_args,
+        extra_env={"HANG_TEARDOWN": "1"} if hang_teardown else None,
     )
     try:
         _wait_for(tmp_path / "started", proc)
@@ -289,7 +336,13 @@ def _run_and_signal(
 
 
 def _wait_for(path: Path, proc: subprocess.Popen, timeout: float = 30) -> None:
-    """Wait for ``path`` to exist while ``proc`` is still running."""
+    """Wait for a marker file to appear while ``proc`` is still running.
+
+    :param path: The marker file.
+    :param proc: The pytest process expected to write it.
+    :param timeout: Seconds to wait.
+    :raises AssertionError: If ``proc`` exits first or ``timeout`` passes.
+    """
     end = time.monotonic() + timeout
     while not path.exists():
         assert proc.poll() is None, f"pytest exited before {path.name} appeared"
@@ -361,44 +414,29 @@ def test_hangs():
 
 def test_watchdog_cleans_up_before_pytest_timeout_kill(tmp_path):
     pytest.importorskip("pytest_timeout")
-    (tmp_path / "conftest.py").write_text(_TIMEOUT_CONFTEST)
-    (tmp_path / "test_hangs.py").write_text(_TIMEOUT_TEST)
-    libgbtest_root = str(Path(abort_cleanup.__file__).resolve().parents[1])
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "PYTHONPATH": libgbtest_root,
-        "MARKER_DIR": str(tmp_path),
-    }
-    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
-    cmd += ["--rootdir", str(tmp_path), "--timeout=3", "--timeout-method=thread"]
-    proc = subprocess.run(
-        [*cmd, str(tmp_path / "test_hangs.py")],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        timeout=60,
+    proc = _start_pytest(
+        tmp_path,
+        _TIMEOUT_CONFTEST,
+        _TIMEOUT_TEST,
+        ["--timeout=3", "--timeout-method=thread"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
-    assert b"Timeout" in proc.stdout + proc.stderr  # pytest-timeout did kill it
+    try:
+        output, _ = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert b"Timeout" in output  # pytest-timeout did kill it
     assert (tmp_path / "cleaned").exists()
 
 
 def test_nohup_run_survives_sighup(tmp_path):
     # Under nohup SIGHUP is ignored; the run must keep going rather than abort.
-    (tmp_path / "conftest.py").write_text(_SIGNAL_CONFTEST)
-    (tmp_path / "test_sleeps.py").write_text(_SIGNAL_TEST)
-    libgbtest_root = str(Path(abort_cleanup.__file__).resolve().parents[1])
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "PYTHONPATH": libgbtest_root,
-        "MARKER_DIR": str(tmp_path),
-    }
-    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
-    proc = subprocess.Popen(
-        [*cmd, "--rootdir", str(tmp_path), str(tmp_path / "test_sleeps.py")],
-        cwd=tmp_path,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    proc = _start_pytest(
+        tmp_path,
+        _SIGNAL_CONFTEST,
+        _SIGNAL_TEST,
         preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN),
     )
     try:

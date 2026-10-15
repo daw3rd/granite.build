@@ -125,7 +125,12 @@ def record_timeout_deadline(item: pytest.Item, settings: Any) -> None:
 
 
 def get_timeout_deadline(item: pytest.Item) -> Optional[TimeoutDeadline]:
-    """The deadline recorded for ``item``, or None when it has no timeout."""
+    """Look up the deadline :func:`record_timeout_deadline` stored for ``item``.
+
+    :param item: The test item.
+    :returns: Its deadline, or None when pytest-timeout set no timer for it
+        (no timeout configured, or pytest-timeout not installed).
+    """
     return item.stash.get(TIMEOUT_DEADLINE_KEY, None)
 
 
@@ -197,7 +202,13 @@ class SerializedCleanup:
 
 
 def _is_debugging() -> bool:
-    """Whether a debugger is attached, by pytest-timeout's own test."""
+    """Check for an attached debugger the way pytest-timeout does.
+
+    pytest-timeout does not fire while one is attached (unless debugger
+    detection is disabled), so neither should the watchdog.
+
+    :returns: True if a debugger (or other trace function) is active.
+    """
     import pytest_timeout
 
     return pytest_timeout.is_debugging()

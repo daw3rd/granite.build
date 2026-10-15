@@ -33,7 +33,11 @@ from gbserver.types.status import Status
 
 
 def _bare_test() -> AbstractBuildTest:
-    """An AbstractBuildTest with only the state setup_method gives the abort code."""
+    """Make an AbstractBuildTest without running setup_method.
+
+    :returns: A test object holding only the state setup_method gives the abort
+        and cleanup code (no storage, cluster login or build).
+    """
     t = object.__new__(cast(Any, AbstractBuildTest))
     t._output_cleanup = SerializedCleanup(t._delete_build_outputs)
     t._deleted_artifact_uris = set()
@@ -49,11 +53,22 @@ class _RunningItemStorage:
     """Item storage whose one item stays RUNNING forever."""
 
     def get_by_uuid(self, uuid):
+        """Look up items the way IItemStorage.get_by_uuid does.
+
+        :param uuid: An item id, or None for all items.
+        :returns: The RUNNING item, or a list holding it when ``uuid`` is None.
+        """
         item = SimpleNamespace(uuid="b1", status=Status.RUNNING)
         return item if uuid is not None else [item]
 
 
 def _wait_for_success(t: AbstractBuildTest, timeout: float) -> None:
+    """Wait for the always-RUNNING build to reach SUCCESS, which it never does.
+
+    :param t: The test object whose _wait_for_status is exercised.
+    :param timeout: The wait's own timeout, in seconds.
+    :raises AssertionError: When the wait is aborted or times out.
+    """
     t._wait_for_status(
         "b1", "build", "b1", cast(Any, _RunningItemStorage()), [Status.SUCCESS], timeout
     )
@@ -87,13 +102,19 @@ class _InterruptedRunner:
     """Runner whose start_and_wait() is interrupted, as by a SIGTERM."""
 
     def __init__(self):
+        """Set up the event that records a stop() call."""
         self.stopped = threading.Event()
 
     def start_and_wait(self):
+        """Run briefly, then be interrupted.
+
+        :raises KeyboardInterrupt: Always, as the mapped SIGTERM would.
+        """
         time.sleep(0.2)
         raise KeyboardInterrupt("pytest received SIGTERM")
 
     def stop(self):
+        """Record that the build was stopped."""
         self.stopped.set()
 
 
@@ -124,12 +145,19 @@ def test_abort_does_not_block_on_a_hung_stop(monkeypatch):
 
 
 class _FakeUri:
+    """Stand-in for URI.get_uri()'s result that records deletions."""
+
     deleted: list[str] = []
 
     def __init__(self, uri):
+        """:param uri: The artifact URI string."""
         self.uri = uri
 
     def delete(self):
+        """Record the deletion instead of deleting anything.
+
+        :returns: True, as a successful URI.delete() does.
+        """
         _FakeUri.deleted.append(self.uri)
         return True
 
