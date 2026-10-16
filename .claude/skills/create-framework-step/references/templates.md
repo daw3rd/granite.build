@@ -24,14 +24,18 @@ STEP_NAME := <name>
 # Custom image only. FIXME: the registry and namespace the image is pushed to.
 REGISTRY ?= quay.io/FIXME
 
-# Only if a local cluster was selected:
+# Only if the slurm cluster was selected, i.e. this file defines `test-setup` below.
+# It tells common.mk to drop its no-op `test-setup`. Don't set it for kube alone:
+# kube's target is `test-setup-kube`, and `make test-setup` would then do nothing.
 HAS_TEST_SETUP := true
 
 include ../../../common.mk       # steps/<category>/<name>/<env>: three levels up
 
-# Only if a local cluster was selected (one target per cluster):
+# One target per local cluster selected:
+# slurm ->
 test-setup:
 	$(MAKE) -C $(REPO_ROOT) slurm-setup
+# kube ->
 .PHONY: test-setup-kube
 test-setup-kube:
 	$(MAKE) -C $(REPO_ROOT) kube-setup

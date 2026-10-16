@@ -122,8 +122,9 @@ values to `src/*.sh` as argv; keep shell logic in scripts, not in the template.
   each `hf://` output landed, not what's in it), have the run script emit
   `GB_STEP_METADATA_KEY:<k> GB_STEP_METADATA_VALUE:<v>` and check it with
   `expected_steps[].metadata` (exact) or `metadata_matches` (regex).
-- One `test-setup` target per local cluster: `test-setup` for slurm,
-  `test-setup-kube` for kube (see the dpk Makefile).
+- One setup target per local cluster: `test-setup` for slurm, `test-setup-kube` for
+  kube (see the dpk Makefile). Set `HAS_TEST_SETUP := true` only when `test-setup`
+  itself is defined (slurm selected); otherwise common.mk's no-op default must stay.
 - `step_count` differs by cluster: see the catalogue. Mark uncalibrated counts
   `# CALIBRATE against the first green run`.
 
@@ -165,7 +166,8 @@ End with this report. Build the placeholder lines from `grep -rn FIXME steps/<pa
 
       ```bash
       make -C steps/<path>/<env> space                  # check the template renders
-      make -C steps/<path>/<env> test-setup             # once, if a local cluster was selected
+      make -C steps/<path>/<env> test-setup             # once, if slurm was selected
+      make -C steps/<path>/<env> test-setup-kube        # once, if kube was selected
       make -C steps/<path>/<env> image publish-image    # custom image only (needs REGISTRY + login)
       make -C steps/<path>/<env> test                   # build tests (custom image: builds it first)
       ```
