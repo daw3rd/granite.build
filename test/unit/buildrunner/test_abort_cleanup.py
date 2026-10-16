@@ -32,6 +32,10 @@ from libgbtest.abort_cleanup import (
     wait_deadline,
 )
 
+# These tests time real waits and deadlines, so opt out of conftest's mock-mode
+# time.sleep, which shortens any sub-second sleep to 0.01s.
+pytestmark = pytest.mark.live("time")
+
 # --- SerializedCleanup ------------------------------------------------------
 
 
