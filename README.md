@@ -189,7 +189,8 @@ For the full schema, see [`docs/builds/build-yaml-reference.md`](docs/builds/bui
 | `src/gbcommon/` | Shared types and utilities. |
 | `docs/` | User, operator, and contributor docs — start at [`docs/README.md`](docs/README.md). |
 | `samples/` | Sample build configs, environments, and steps. The [`standalone-quickstart`](samples/standalone/standalone-quickstart/) is the canonical first build. |
-| `configurations/` | Space, environment, step, and assetstore configurations consumed by builds. [`configurations/assets/`](configurations/assets/) holds the reusable assetstores, environments, and steps; [`configurations/spaces/local/`](configurations/spaces/local/) is the user-facing space for `GB_ENVIRONMENT=STANDALONE` and ships the build templates. |
+| `steps/` | Source for the repo's steps: the [step framework](steps/README.md). Each step is authored under `steps/<category>/<name>/<env>/` (a `step-template.yaml`, `Makefile`, `src/`, and per-cluster build tests), and `make publish-step` promotes it into `configurations/assets/`, with its tests into `test/steps/`. Start a new one with the [`create-framework-step`](#coding-agent-skills) skill. |
+| `configurations/` | Space, environment, step, and assetstore configurations consumed by builds. [`configurations/assets/`](configurations/assets/) holds the reusable assetstores, environments, and steps; steps sourced in `steps/` are generated here and shouldn't be edited in place. [`configurations/spaces/local/`](configurations/spaces/local/) is the user-facing space for `GB_ENVIRONMENT=STANDALONE` and ships the build templates. |
 | `test/` | Test suites for all components. |
 | `scripts/` | Helper scripts including the standalone and SLURM demos. |
 | `k8s/` | Helm charts for production Kubernetes deployment. |
