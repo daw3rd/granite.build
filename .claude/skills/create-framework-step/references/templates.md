@@ -5,7 +5,9 @@ Replace `<category>`, `<name>` (may contain hyphens), `<path>` (= `<category>/<n
 expression), `<Name>`, `<env>`, `<cluster>`. `<in>` and `<out>` stand for one input
 or output name. Repeat the line holding it, **or the whole block it heads** (that line
 plus the more-indented lines under it, e.g. `<in>:` with its `type:`/`accept:` or
-`uri:`), once per name the user gave. Drop it when they said `none`, and then drop
+`uri:`), once per name the user gave. If a name is a Python dict method (`items`,
+`keys`, `get`, ...), write its binding as `bindings["<in>"]` rather than
+`bindings.<in>` (see SKILL.md, "Normalizing the answers"). Drop it when they said `none`, and then drop
 an emptied `required:` too (`inputs: {allow_unknown: true}`), because a bare
 `required:` is null, not an empty map. Working examples to copy from:
 `steps/distill/vllm-server/skypilot` (nested under a category, like a new step),

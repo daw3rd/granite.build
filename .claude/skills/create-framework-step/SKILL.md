@@ -50,6 +50,14 @@ Turn each name into a Jinja-safe identifier: lowercase, hyphens and spaces becom
 underscores (`bindings.<name>` and `GB_ARTIFACT_ID:<name>` both use it). If you changed
 a name, say so in the hand-off. `none` means an empty list.
 
+**Input names that are Python dict methods** (`items`, `keys`, `values`, `get`, `pop`,
+`update`, `copy`, `clear`, `setdefault`, `popitem`, `fromkeys`): in Jinja,
+`bindings.items` is the dict's method, not the binding, and the launcher fails to
+render at launch. Keep the name, but write every reference to it with a subscript:
+`bindings["items"].binding.path`, and `"items" in bindings` instead of
+`bindings.items is defined`. Say in the hand-off which inputs got this, and that
+renaming them is the simpler fix.
+
 Then generate the whole step. Take every other decision from the prompt when it's
 there; otherwise use the placeholder below. Every placeholder carries a `FIXME`
 comment (or is the literal value `FIXME`), so `grep -rn FIXME` finds all of them.
@@ -87,6 +95,8 @@ steps/<path>/<env>/
 **Inputs.** Declare every input the step reads and read it as
 `{{ bindings.<name>.binding.path }}` (`.state` for `mem://`). Guard optional ones with
 `{% if bindings.<name> is defined %}`. Don't pass input paths through config keys.
+For a name that is a dict method, use the subscript forms from "Normalizing the
+answers" above.
 
 **Outputs.** Output URIs are **not** in the render context, so the step can't template
 an output path. It writes to a path it picks (default `./output`, made absolute) or
@@ -99,6 +109,9 @@ and a missing parent block is an error at launch. So every key needs a default i
 `step-template.yaml`. Escape every value that goes into the shell with a `q()` macro,
 defined in **both** `setup` and `run`, because Jinja macros are block-scoped. Pass
 values to `src/*.sh` as argv; keep shell logic in scripts, not in the template.
+The dict-method trap applies to config keys too: when the user later asks for a key
+like `items` or `keys`, suggest another name, or read it as
+`config.<cfg>_config["items"]`.
 
 **Build tests.**
 - Basenames must be unique across all cluster dirs (no `__init__.py`; duplicates
