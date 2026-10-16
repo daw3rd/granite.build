@@ -57,7 +57,7 @@ comment (or is the literal value `FIXME`), so `grep -rn FIXME` finds all of them
 | Decision | Rule | Placeholder when not given |
 |---|---|---|
 | **Name** | Asked (call 1). `STEP_NAME` is a slash-free leaf, placed under the category: `steps/<category>/<name>/<env>/`. Check `configurations/assets/environments/*/steps/` and `src/gbserver/builtins/steps/` for an existing step of that name first, and if one exists, say so in the hand-off. If `steps/<category>/` is itself a step (it has an `<env>/` dir with a `step-template.yaml`, as `steps/eval/skypilot` does today), say so too: once that step is published, its `check-published` reports the nested step as drift. Generate anyway. | When `new-step` was chosen: `# FIXME: rename (git mv the dir; update STEP_NAME, name:, <cfg>_config and every step_uri)` on its own line above `STEP_NAME` (a trailing comment on a Make assignment keeps the spaces in the value) |
-| **Step image** | Asked (question 3). **Public:** no Dockerfile; `image_id: ""  # FIXME: set a public image if the code needs one`; `file_mounts: {src: src}` ships the scripts. **Custom:** the Dockerfile skeleton, `REGISTRY` in the Makefile, `image_id: "docker:${IMAGE_REF}"`, scripts baked in at `/opt/<name>/` (no `file_mounts`). Both variants are in [references/templates.md](references/templates.md). | — |
+| **Step image** | Asked (call 2). **Public:** no Dockerfile; `image_id: ""  # FIXME: set a public image if the code needs one`; `file_mounts: {src: src}` ships the scripts. **Custom:** the Dockerfile skeleton, `REGISTRY` in the Makefile, `image_id: "docker:${IMAGE_REF}"`, scripts baked in at `/opt/<name>/` (no `file_mounts`). Both variants are in [references/templates.md](references/templates.md). | — |
 | **Inputs** | Names asked (call 1). Each name becomes a required input with `type: dataset`, `accept: [uri, binding]` and `# FIXME: type, required/optional`, a `--input-<name>` argument in `run:`, and a `uri: FIXME` input in each fixture. | — |
 | **Outputs** | Names asked (call 1). Each name becomes a required output with `type: dataset` and `# FIXME: type`, a `--output-<name> ./<name>` argument in `run:`, one artifact marker in the `run.sh` stub's contract, and an `hf://` output in each fixture: `hf://huggingface.co/datasets/__GBTEST_HF_PUSH_ORG__/<name>-<output>___GBTEST_HF_PUSH_RUN__` with a `# FIXME: dataset name`. Never `env://` in fixtures. Each build test then mixes in `HfPushCleanupMixin` (`libgbtest.hfpush`), which fills in those tokens per run, checks the push landed, and deletes the dataset. A `mem://` value output (`GB_ARTIFACT_STATE`) is a later change. | — |
 | **Configuration** | One block `config.<cfg>_config:`, where `<cfg>` is the name with hyphens turned into underscores (`jsonl-dedup` → `jsonl_dedup_config`; a hyphen parses as subtraction in Jinja). **Every key defaulted**, plus `compute_config` if it needs sizing. | **Leave it empty** (`<cfg>_config: {}`) with a `FIXME`, even if the prompt describes settings: the user directs those after the skeleton exists. Nothing references a config key yet |
@@ -139,7 +139,7 @@ and don't commit.
 
 End with this report. Build the placeholder lines from `grep -rn FIXME steps/<path>/<env>`.
 
-1. **What was generated**: the directory, the answers to the four questions, and any
+1. **What was generated**: the directory, the answers from both calls, and any
    values taken from the prompt.
 2. **Warnings**, if any apply: a custom image with the local `slurm` cluster selected;
    a category dir that is itself a step (see the Name row).
@@ -186,7 +186,7 @@ End with this report. Build the placeholder lines from `grep -rn FIXME steps/<pa
 |---|---|
 | Editing `configurations/assets/.../steps/<name>/` or `test/steps/` | Edit `steps/<path>/<env>/`, re-run `make publish-step`. |
 | Choosing clusters without asking | Ask (multi-select) from the catalogue. |
-| Asking for the name, inputs, config or test data before generating | Generate with placeholders; list them in the hand-off. |
+| Asking anything beyond the two calls' seven questions (config, types, image settings, test data) before generating | Generate with placeholders; list them in the hand-off. |
 | Running `make`, tests or formatters after generating | Don't. List the commands in the hand-off. |
 | A placeholder with no `FIXME` marker | Every placeholder carries `FIXME`, or the hand-off grep misses it. |
 | IBM-space test without `pytest.mark.ibm` | Set `pytestmark = pytest.mark.ibm`. |
