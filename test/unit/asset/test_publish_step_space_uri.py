@@ -1,0 +1,123 @@
+# Copyright LLM.build Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""`make publish-step` repoints only LOCAL buildtest.yaml space_uris.
+
+publish-step copies a step's per-cluster fixtures into test-data/steps/ and rewrites
+each buildtest.yaml's ``space_uri`` to configurations/spaces/local, so a Mode-1 test
+that read the locally rendered ``../../space`` resolves the PUBLISHED step in Mode 2.
+
+A fixture whose ``space_uri`` is a remote git space (e.g. the IBM
+``git+ssh://github.ibm.com/...`` space, used by tests marked ``ibm``) already resolves
+the step from that remote space in both modes. Rewriting it would silently point an
+IBM-cluster test at the local space, whose environments lack the IBM secrets and
+cluster definitions, so those values must be copied through unchanged.
+
+The test runs the real steps/common.mk against a throwaway step in a temp tree:
+REPO_ROOT is derived from common.mk's location, so publishing writes only under
+``tmp_path``.
+"""
+
+import pathlib
+import shutil
+import subprocess
+
+import pytest
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+COMMON_MK = REPO_ROOT / "steps" / "common.mk"
+
+LOCAL_URI = "../../space"
+REMOTE_URIS = {
+    "ibm-git": "git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config",
+    "quoted-https": '"https://github.ibm.com/granite-dot-build/gb-test.git"',
+}
+
+
+def _make_step(root: pathlib.Path) -> pathlib.Path:
+    """Create a minimal public-image step at ``root/steps/fake/skypilot``.
+
+    Args:
+        root: temp directory standing in for the repo root.
+
+    Returns:
+        The step directory, with one per-cluster fixture per entry in
+        ``REMOTE_URIS`` plus a ``local`` one using ``LOCAL_URI``.
+    """
+    (root / "steps").mkdir()
+    shutil.copy(COMMON_MK, root / "steps" / "common.mk")
+    step = root / "steps" / "fake" / "skypilot"
+    step.mkdir(parents=True)
+    (step / "Makefile").write_text("STEP_NAME := fake\ninclude ../../common.mk\n")
+    (step / "step-template.yaml").write_text("name: fake\n")
+    (step / "USAGE.md").write_text("# fake\n")
+    for cluster, uri in {"local": LOCAL_URI, **REMOTE_URIS}.items():
+        (step / "test" / cluster).mkdir(parents=True)
+        (step / "test" / cluster / f"test_{cluster.replace('-', '_')}.py").write_text(
+            ""
+        )
+        (step / "test-data" / cluster).mkdir(parents=True)
+        (step / "test-data" / cluster / "buildtest.yaml").write_text(
+            f"targets: [t]\nspace_uri: {uri}\ntests: [runner]\n"
+        )
+    return step
+
+
+def _published_space_uri(root: pathlib.Path, cluster: str) -> str:
+    """Return the space_uri line's value from a published fixture.
+
+    Args:
+        root: the temp repo root that was published into.
+        cluster: the per-cluster fixture dir name.
+
+    Returns:
+        The text after ``space_uri:``, stripped.
+    """
+    path = (
+        root / "test-data" / "steps" / "fake" / "skypilot" / cluster / "buildtest.yaml"
+    )
+    line = next(
+        ln for ln in path.read_text().splitlines() if ln.startswith("space_uri:")
+    )
+    return line.split(":", 1)[1].strip()
+
+
+@pytest.fixture(scope="module")
+def published(tmp_path_factory) -> pathlib.Path:
+    """Run ``make publish-step`` once on the throwaway step; return the temp root."""
+    if shutil.which("make") is None:
+        pytest.skip("make not installed")
+    root = tmp_path_factory.mktemp("repo")
+    step = _make_step(root)
+    subprocess.run(
+        ["make", "-s", "publish-step", "PUBLISH_REQUIRE_IMAGE=false"],
+        cwd=step,
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    return root
+
+
+def test_local_space_uri_is_repointed_at_the_shared_space(published):
+    """A relative local space_uri becomes the depth-derived configurations/spaces/local."""
+    assert _published_space_uri(published, "local") == (
+        "../../../../../configurations/spaces/local"
+    )
+
+
+@pytest.mark.parametrize("cluster", sorted(REMOTE_URIS))
+def test_remote_space_uri_is_copied_unchanged(published, cluster):
+    """A remote git space_uri (e.g. github.ibm.com) survives publish-step verbatim."""
+    assert _published_space_uri(published, cluster) == REMOTE_URIS[cluster]
