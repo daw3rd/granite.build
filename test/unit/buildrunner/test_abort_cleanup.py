@@ -204,6 +204,21 @@ def test_watchdog_does_nothing_under_debugger(monkeypatch):
     assert not fired.wait(0.8)
 
 
+def test_is_debugging_is_false_without_pytest_timeout(monkeypatch):
+    # A None entry in sys.modules makes `import pytest_timeout` raise ImportError.
+    monkeypatch.setitem(sys.modules, "pytest_timeout", None)
+    assert abort_cleanup._is_debugging() is False
+
+
+def test_watchdog_runs_without_pytest_timeout(monkeypatch):
+    # The stages must still run when pytest-timeout is not installed.
+    monkeypatch.setitem(sys.modules, "pytest_timeout", None)
+    done = threading.Event()
+    watchdog = _watchdog(_deadline(0.6), abort=lambda: None, cleanup=done.set)
+    watchdog.start()
+    assert done.wait(2)
+
+
 # --- termination signals ----------------------------------------------------
 
 

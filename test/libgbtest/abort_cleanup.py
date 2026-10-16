@@ -205,12 +205,17 @@ def _is_debugging() -> bool:
     """Check for an attached debugger the way pytest-timeout does.
 
     pytest-timeout does not fire while one is attached (unless debugger
-    detection is disabled), so neither should the watchdog.
+    detection is disabled), so neither should the watchdog. Without
+    pytest-timeout installed there is no timeout kill to mirror, so this
+    reports False rather than failing inside the watchdog's timer thread.
 
-    :returns: True if a debugger (or other trace function) is active.
+    :returns: True if pytest-timeout is installed and sees a debugger (or other
+        trace function) active.
     """
-    import pytest_timeout
-
+    try:
+        import pytest_timeout
+    except ImportError:
+        return False
     return pytest_timeout.is_debugging()
 
 
