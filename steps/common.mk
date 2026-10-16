@@ -248,9 +248,13 @@ MODE2_SPACE_URI  ?= $(MODE2_DOTDOT)configurations/spaces/local
 # REMOTE means any other <scheme>:// URI (git://, git+ssh://, https://, ...) or the
 # scp-like user@host:path form; it is copied unchanged. An ERE can't say "any scheme
 # except file", so file:// lines are rewritten first (FILE_...), then every line
-# not matching REMOTE_... is. `[^a-zA-Z]*` skips the blank and any opening quote.
-FILE_SPACE_URI_RE   := ^space_uri:[^a-zA-Z]*file://
-REMOTE_SPACE_URI_RE := ^space_uri:[^a-zA-Z]*([a-zA-Z][a-zA-Z0-9+.-]*://|[^[:space:]"/]+@[^[:space:]"/]+:)
+# not matching REMOTE_... is. Both anchor the URI right after blanks and at most one
+# opening quote, so a local path containing `@`, `:` or `://` (../../a@b:c/space)
+# stays local. The RE is pasted into a single-quoted sed program, so the `'` in the
+# quote class is written as the shell's '"'"'.
+SPACE_URI_VALUE_RE  := ^space_uri:[[:space:]]*["'"'"']?
+FILE_SPACE_URI_RE   := $(SPACE_URI_VALUE_RE)file://
+REMOTE_SPACE_URI_RE := $(SPACE_URI_VALUE_RE)([a-zA-Z][a-zA-Z0-9+.-]*://|[a-zA-Z0-9_][a-zA-Z0-9._-]*@[a-zA-Z0-9.-]+:)
 
 # publish-step refuses to publish a custom-image step until its IMAGE_REF exists on
 # the registry — a step.yaml/build test referencing an unpublished image is broken

@@ -47,6 +47,11 @@ LOCAL_URIS = {
     "local-bare": "../../space",
     "local-file": "file://../../space",
     "local-quoted": '"../../space"',
+    "local-single-quoted": "'../../space'",
+    # Local paths that contain remote-looking pieces must still be rewritten:
+    "local-at-in-path": "../../git@mirror/space",
+    "local-scp-lookalike": "../../a@b:c/space",
+    "local-home-scp-lookalike": "~/mirror@x:1/space",
 }
 REMOTE_URIS = {
     "ibm-git-ssh": "git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config",
@@ -54,6 +59,7 @@ REMOTE_URIS = {
     "plain-git": "git://github.ibm.com/granite-dot-build/gb-test.git",
     "scp-user": "alice@github.ibm.com:granite-dot-build/gb-test.git",
     "scp-git": "git@github.ibm.com:granite-dot-build/gb-test.git",
+    "single-quoted-git": "'git://github.ibm.com/granite-dot-build/gb-test.git'",
 }
 
 
