@@ -27,8 +27,10 @@ STEP_NAME := <name>
 REGISTRY ?= quay.io/FIXME
 
 # Only if the slurm cluster was selected, i.e. this file defines `test-setup` below.
-# It tells common.mk to drop its no-op `test-setup`. Don't set it for kube alone:
-# kube's target is `test-setup-kube`, and `make test-setup` would then do nothing.
+# It tells common.mk to drop its own no-op `test-setup`. Don't set it for kube alone
+# (kube's target is `test-setup-kube`). It wouldn't fail: common.mk lists test-setup
+# in .PHONY, so `make test-setup` would print "Nothing to be done" and exit 0, giving
+# no sign that setup never ran. Unset, common.mk's no-op says so explicitly.
 HAS_TEST_SETUP := true
 
 include ../../../common.mk       # steps/<category>/<name>/<env>: three levels up
