@@ -52,6 +52,12 @@ LOCAL_URIS = {
     "local-at-in-path": "../../git@mirror/space",
     "local-scp-lookalike": "../../a@b:c/space",
     "local-home-scp-lookalike": "~/mirror@x:1/space",
+    # The create-framework-step skill's fixture template writes exactly this line; the
+    # remote URI in its comment must not make the local value look remote.
+    "local-template-comment": (
+        "../../space         # IBM: "
+        "git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config"
+    ),
 }
 REMOTE_URIS = {
     "ibm-git-ssh": "git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config",
@@ -60,6 +66,8 @@ REMOTE_URIS = {
     "scp-user": "alice@github.ibm.com:granite-dot-build/gb-test.git",
     "scp-git": "git@github.ibm.com:granite-dot-build/gb-test.git",
     "single-quoted-git": "'git://github.ibm.com/granite-dot-build/gb-test.git'",
+    "ssh": "ssh://git@github.ibm.com/granite-dot-build/gb-test.git",
+    "remote-with-comment": "git+ssh://github.ibm.com/o/r.git@b  # kept as written",
 }
 
 
