@@ -392,7 +392,13 @@ This repo ships **Agent Skills** under [`.claude/skills/`](.claude/skills/) so a
 | [`run-gbserver`](.claude/skills/run-gbserver/SKILL.md) | Ensure the standalone `gbserver` backend is running (via the `gbserver_start` tool) — the prerequisite for running any build. |
 | [`create-build`](.claude/skills/create-build/SKILL.md) | Author a `build.yaml` that runs a workload inline via the built-in `command` step — training, inference/serving, data generation, or evaluation. |
 | [`create-step`](.claude/skills/create-step/SKILL.md) | Author a reusable custom step (`step.yaml` + `bash_scripts/`, referenced by a `file://` URI) — for owned or multi-file code. |
+| [`create-framework-step`](.claude/skills/create-framework-step/SKILL.md) | Generate the skeleton of a new step in this repo's [`steps/` framework](steps/README.md) (`steps/<category>/<name>/<env>/`): `step-template.yaml`, Makefile, `src/` stubs, and build tests for the clusters you pick. Leaves `FIXME`s and lists your next steps. |
 | [`gb-docs`](.claude/skills/gb-docs/SKILL.md) | Look up the in-repo [`docs/`](docs/) (schema, CLI, concepts, troubleshooting) and answer grounded in them. |
+
+**Which step skill?** Use `create-step` for a step that lives in *your own project* and is
+referenced by a `file://` URI. Use `create-framework-step` for a step you're adding *to
+granite.build itself*: it is published into `configurations/` with `make publish-step`
+and referenced as `space://steps/<category>/<name>`.
 
 Each skill is a `SKILL.md` (`name` + `description` + instructions) in the portable [Agent Skills](https://agentskills.io) format; the agent matches on the `description` to decide when to use it.
 
