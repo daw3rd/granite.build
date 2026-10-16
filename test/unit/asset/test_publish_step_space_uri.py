@@ -24,6 +24,10 @@ the step from that remote space in both modes. Rewriting it would silently point
 IBM-cluster test at the local space, whose environments lack the IBM secrets and
 cluster definitions, so those values must be copied through unchanged.
 
+"Local" follows libgbtest's ``_resolve_space_uri``: a bare path or a ``file://`` URI.
+Anything else is remote: any other ``<scheme>://`` URI, and the scp-like
+``user@host:path`` form (copied unchanged rather than silently repointed).
+
 The test runs the real steps/common.mk against a throwaway step in a temp tree:
 REPO_ROOT is derived from common.mk's location, so publishing writes only under
 ``tmp_path``.
@@ -38,10 +42,18 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 COMMON_MK = REPO_ROOT / "steps" / "common.mk"
 
-LOCAL_URI = "../../space"
+MODE2_URI = "../../../../../configurations/spaces/local"
+LOCAL_URIS = {
+    "local-bare": "../../space",
+    "local-file": "file://../../space",
+    "local-quoted": '"../../space"',
+}
 REMOTE_URIS = {
-    "ibm-git": "git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config",
+    "ibm-git-ssh": "git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config",
     "quoted-https": '"https://github.ibm.com/granite-dot-build/gb-test.git"',
+    "plain-git": "git://github.ibm.com/granite-dot-build/gb-test.git",
+    "scp-user": "alice@github.ibm.com:granite-dot-build/gb-test.git",
+    "scp-git": "git@github.ibm.com:granite-dot-build/gb-test.git",
 }
 
 
@@ -53,7 +65,7 @@ def _make_step(root: pathlib.Path) -> pathlib.Path:
 
     Returns:
         The step directory, with one per-cluster fixture per entry in
-        ``REMOTE_URIS`` plus a ``local`` one using ``LOCAL_URI``.
+        ``LOCAL_URIS`` and ``REMOTE_URIS``.
     """
     (root / "steps").mkdir()
     shutil.copy(COMMON_MK, root / "steps" / "common.mk")
@@ -62,7 +74,7 @@ def _make_step(root: pathlib.Path) -> pathlib.Path:
     (step / "Makefile").write_text("STEP_NAME := fake\ninclude ../../common.mk\n")
     (step / "step-template.yaml").write_text("name: fake\n")
     (step / "USAGE.md").write_text("# fake\n")
-    for cluster, uri in {"local": LOCAL_URI, **REMOTE_URIS}.items():
+    for cluster, uri in {**LOCAL_URIS, **REMOTE_URIS}.items():
         (step / "test" / cluster).mkdir(parents=True)
         (step / "test" / cluster / f"test_{cluster.replace('-', '_')}.py").write_text(
             ""
@@ -93,8 +105,8 @@ def _published_space_uri(root: pathlib.Path, cluster: str) -> str:
     return line.split(":", 1)[1].strip()
 
 
-@pytest.fixture(scope="module")
-def published(tmp_path_factory) -> pathlib.Path:
+@pytest.fixture(name="published", scope="module")
+def fixture_published(tmp_path_factory) -> pathlib.Path:
     """Run ``make publish-step`` once on the throwaway step; return the temp root."""
     if shutil.which("make") is None:
         pytest.skip("make not installed")
@@ -110,14 +122,13 @@ def published(tmp_path_factory) -> pathlib.Path:
     return root
 
 
-def test_local_space_uri_is_repointed_at_the_shared_space(published):
-    """A relative local space_uri becomes the depth-derived configurations/spaces/local."""
-    assert _published_space_uri(published, "local") == (
-        "../../../../../configurations/spaces/local"
-    )
+@pytest.mark.parametrize("cluster", sorted(LOCAL_URIS))
+def test_local_space_uri_is_repointed_at_the_shared_space(published, cluster):
+    """A local space_uri becomes the depth-derived configurations/spaces/local."""
+    assert _published_space_uri(published, cluster) == MODE2_URI
 
 
 @pytest.mark.parametrize("cluster", sorted(REMOTE_URIS))
 def test_remote_space_uri_is_copied_unchanged(published, cluster):
-    """A remote git space_uri (e.g. github.ibm.com) survives publish-step verbatim."""
+    """A remote space_uri (e.g. github.ibm.com) survives publish-step verbatim."""
     assert _published_space_uri(published, cluster) == REMOTE_URIS[cluster]

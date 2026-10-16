@@ -565,8 +565,9 @@ BlueVela SLURM, `space://environments/skypilot/slurm/bluevela`) needs a fixture 
 `space_uri` is that remote git space, e.g.
 `git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config`. Mark such a
 test `pytestmark = pytest.mark.ibm`. `publish-step` copies a **remote** `space_uri`
-(one starting `git+`, `git@`, `http(s)://` or `ssh://`) through **unchanged** and
-rewrites only local ones. In both modes, a remote-space test resolves
+(any `<scheme>://` URI other than `file://`, such as `git://`, `git+ssh://` or
+`https://`, or the scp-like `user@host:path` form) through **unchanged**. It rewrites
+only local ones: a bare path or a `file://` URI. In both modes, a remote-space test resolves
 `space://steps/<name>` from the remote space, so it exercises the step that space
 has, **not** your local source: publish the step to that space's assets before relying
 on it.
