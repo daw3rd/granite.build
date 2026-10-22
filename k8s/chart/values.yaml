@@ -116,6 +116,51 @@ deployments:
     - GBSERVER_WANDB_API_KEY
     - GBSERVER_WANDB_ENTITY
     # OpenLineage / WandB ---
+  lineageIndexer:
+    # Fills gb_lineage_index incrementally, in its own pod, from wherever
+    # GBSERVER_LINEAGE_PROVIDER records lineage: W&B runs (wandb),
+    # gb_lineage_job (db) or gb_targets (none).
+    enable: true
+    # Keep at 1: the indexer is the single writer of its checkpoint. The
+    # deployment uses the Recreate strategy so a rollout never runs two at once.
+    replicas: 1
+    # The indexer indexes nothing until its checkpoint is seeded. On start the pod
+    # runs gbserver lineage-index-init --base-timestamp <seedOnStart>, which only
+    # writes when there is no checkpoint yet (an existing one is never touched).
+    # from-latest indexes from the newest job onward (from the beginning when the
+    # source has no job yet, i.e. a fresh install); set to "all" to back-fill
+    # history once, or "" to seed by hand (from-latest|all|<ISO-8601>). Changing it
+    # after the first start does nothing; use lineage-index-init --force.
+    seedOnStart: from-latest
+    resources:
+      limits:
+        cpu: "1"
+        ephemeral-storage: 2Gi
+        memory: 2Gi
+      requests:
+        cpu: "250m"
+        ephemeral-storage: 1Gi
+        memory: 512Mi
+    env:
+      GBSERVER_SQL_SSLROOT_CERT: ibm-cloud-databases.cert
+      GBSERVER_LINEAGE_PROVIDER: wandb
+      GBSERVER_WANDB_BASE_URL: https://ibm.wandb.io
+      GBSERVER_WANDB_PROJECT: lineage-tracking
+    envFromMainSecret:
+    - GB_ENVIRONMENT
+    # Admin DB access (reconciliation reads builds/targets from admin storage).
+    - GBSERVER_SQL_USER
+    - GBSERVER_SQL_PASSWD
+    - GBSERVER_SQL_HOST
+    - GBSERVER_SQL_PORT
+    - GBSERVER_SQL_DBNAME
+    - GBSERVER_SQL_SCHEMA
+    - GBSERVER_SQL_ECHO
+    - GBSERVER_METADATA_STORAGE
+    # OpenLineage / WandB ---
+    - GBSERVER_WANDB_API_KEY
+    - GBSERVER_WANDB_ENTITY
+    # OpenLineage / WandB ---
   restServer:
     enable: true
     # enable: false
