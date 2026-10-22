@@ -1,15 +1,20 @@
-# IBM space providing access to internal IBM infrastructure, especially gpus. 
+# IBM space providing access to internal IBM infrastructure, especially gpus.
 # Using this space will generally require the following env vars:
-#   GBSERVER_GITHUB_TOKEN (or GITHUB_TOKEN) 
+#   GBSERVER_GITHUB_TOKEN (or GITHUB_TOKEN)
 #   IBM_CLOUD_API_KEY
 # and the following:
 #   passwordless ssh access to github.ibm.com
-
+#
+# Shortcut for the test suite: set GBTEST_SPS_IBMCLOUD_API_KEY instead. The test
+# conftest uses it to load IBM_CLOUD_API_KEY and the other required env vars from
+# the SPS ETE account, so they need not be exported one by one. You must use
+# the 'make ibm-venv' to enabled that env var.
 name: ibm 
 secret_manager:
   type: ibmcloud
-  # service_url mirrors gb-test's own space.yaml (a non-secret endpoint; the API
-  # key is supplied out-of-band via GBTEST_SPS_IBMCLOUD_API_KEY — see conftest).
+  # service_url mirrors gb-test's own space.yaml (a non-secret endpoint). The API
+  # key comes from IBM_CLOUD_API_KEY (in tests, loaded via
+  # GBTEST_SPS_IBMCLOUD_API_KEY — see the header above and test/conftest.py).
   # Required so BV_SSH_PRIVATE_KEY resolves for the env's SSH IdentityKey.
   config:
     service_url: https://3a634e1e-2591-4a19-baa8-34cf8f12defb.us-east.secrets-manager.appdomain.cloud
