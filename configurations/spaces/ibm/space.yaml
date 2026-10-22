@@ -8,7 +8,7 @@
 # Shortcut for the test suite: set GBTEST_SPS_IBMCLOUD_API_KEY instead. The test
 # conftest uses it to load IBM_CLOUD_API_KEY and the other required env vars from
 # the SPS ETE account, so they need not be exported one by one. You must use
-# the 'make ibm-venv' to enabled that env var.
+# the 'make ibm-venv' to enable that env var.
 name: ibm 
 secret_manager:
   type: ibmcloud
