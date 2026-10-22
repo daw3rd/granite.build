@@ -36,7 +36,8 @@ target_expectations:
 # file:///path/to/your/assets-clone/steps/custom_code_skypilot/validators in the
 # local assets clone (see the test docstring).
 #space_uri: ../../../../../../../../gb-test
-space_uri: git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config
+space_uri: ../../../../../../../configurations/spaces/ibm
+#space_uri: git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config
 # Happy-path only. The cancellation variant is intentionally omitted for v1: a
 # long conda/micromamba env build makes cancellation timing flaky. Add later.
 simulate_step_failure: false

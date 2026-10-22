@@ -1,0 +1,28 @@
+# IBM space providing access to internal IBM infrastructure, especially gpus. 
+# Using this space will generally require the following env vars:
+#   GBSERVER_GITHUB_TOKEN (or GITHUB_TOKEN) 
+#   IBM_CLOUD_API_KEY
+# and the following:
+#   passwordless ssh access to github.ibm.com
+
+name: ibm 
+secret_manager:
+  type: ibmcloud
+  # service_url mirrors gb-test's own space.yaml (a non-secret endpoint; the API
+  # key is supplied out-of-band via GBTEST_SPS_IBMCLOUD_API_KEY — see conftest).
+  # Required so BV_SSH_PRIVATE_KEY resolves for the env's SSH IdentityKey.
+  config:
+    service_url: https://3a634e1e-2591-4a19-baa8-34cf8f12defb.us-east.secrets-manager.appdomain.cloud
+base_uris:
+  # Searched in order; the first base that has a matching asset wins.
+  # Base URIs do NOT chain: gb-test's own space.yaml base_uris (which point at the
+  # assets repo) are not followed, so every repo this space needs is listed here.
+  # The git entries require SSH access to github.ibm.com (IBM intranet / VPN).
+  #
+  # Resolve the IBM environments + assetstores from the remote gb-test space 
+  - git+ssh://github.ibm.com/granite-dot-build/gb-test.git@gbspace-config
+  # IBM step catalog (e.g. steps/custom_code_skypilot), which gb-test itself
+  # resolves through its own base_uris.
+  - git+ssh://github.ibm.com/granite-dot-build/assets.git@gbspace-config-dev
+  # This repo's shared assets (configurations/assets), relative to this file.
+  - file://../../assets

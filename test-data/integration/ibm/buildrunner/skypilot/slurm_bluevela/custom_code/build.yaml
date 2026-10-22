@@ -39,6 +39,9 @@ granite.build:
             compute_config:
               num_nodes: 1
               num_gpus_per_node: 1
+            launcher_config:
+              resources:
+                accelerators: "H200:1"
             byoc_config:
               # Schema: this block is the custom_code_skypilot step's own
               # byoc_config, validated at build time by that step's
