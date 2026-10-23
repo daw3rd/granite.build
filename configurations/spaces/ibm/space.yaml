@@ -9,7 +9,14 @@
 # conftest uses it to load IBM_CLOUD_API_KEY and the other required env vars from
 # the SPS ETE account, so they need not be exported one by one. You must use
 # the 'make ibm-venv' to enable that env var.
-name: ibm 
+#
+# Named `public` (not `ibm`) on purpose: hf:// pushes into HF Enterprise orgs such
+# as ibm-research attach the resource group derived from the space name,
+# `gbspace-<name>` (plus `-staging`/`-dev` outside PROD). gbspace-public[-staging]
+# exist in ibm-research; gbspace-ibm[-staging] do not, so `name: ibm` fails every
+# push with "Could not resolve resource group id for 'gbspace-ibm-staging'". This
+# also matches gb-test's own space name, which these tests used before.
+name: public
 secret_manager:
   type: ibmcloud
   # service_url mirrors gb-test's own space.yaml (a non-secret endpoint). The API
