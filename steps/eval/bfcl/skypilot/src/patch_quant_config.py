@@ -4,7 +4,7 @@ recipe.yaml (scheme: FP8_DYNAMIC, etc.) but no matching config.json
 quantization_config -- vLLM can't autodetect a loader for those, and
 forcing --quantization fp8 picks the wrong (native, not compressed-tensors)
 loader, which fails opaquely on the checkpoint's real weight_scale tensors.
-See steps/bfcl-eval/README.md for the full failure mode this works around.
+See steps/eval/bfcl/skypilot/README.md for the full failure mode this works around.
 
 Usage: patch_quant_config.py <model_path> <output_dir>
 Prints the model path to actually load (staged copy if patched, otherwise
