@@ -173,7 +173,8 @@ make lint          # full check-mode lint across src/gbserver, src/gbcli, src/gb
 `make xformat` / `make xcheck` limit formatting/typecheck to files changed against the `main` branch. `make xcheck` also
 checks changed python files under `steps/`, running pylint + mypy separately from each step's root (the directory holding
 `step-template.yaml`) with the step's `src/`, the repo `src/` and `test/` on the import path. Imports of a step's
-runtime-only dependencies (torch, transformers, ...) that aren't installed in the dev venv are not reported.
+runtime-only dependencies (torch, transformers, ...) that aren't installed in the dev venv are not reported. pylint's
+`redefined-outer-name` is disabled for files under a step's `test/` (every pytest fixture argument triggers it).
 
 ## Test layout
 

@@ -29,6 +29,17 @@ step_root_of() {
     done
 }
 
+# Run pylint on some files of one step, from the step root.
+#   $1    - pylint --disable list for these files ("" for none)
+#   $2... - files to check, relative to the step root
+pylint_step_files() {
+    local disable="$1"
+    shift
+    [[ $# -gt 0 ]] || return 0
+    PYTHONPATH="src:${REPO_ROOT}/src:${REPO_ROOT}/test" \
+        pylint --rcfile="${REPO_ROOT}/.pylintrc" ${disable:+--disable="${disable}"} "$@"
+}
+
 # Run pylint + mypy on some files of one step, from the step root, and print the
 # results with paths rewritten to be repo-relative.
 #   $1    - step root (repo-relative)
@@ -38,15 +49,21 @@ step_root_of() {
 # (torch, transformers, ...) usually aren't installed in the dev venv, so
 # import-not-found is suppressed. --follow-imports=silent keeps errors that live
 # in src/gbserver/ out of the step report (staticcheck covers those).
+# Under test/, redefined-outer-name is disabled: every pytest fixture used as a
+# test argument triggers it, which buried real warnings (~2/3 of all messages).
 check_step() {
-    local root="$1"
+    local root="$1" f
+    local tests=() others=()
     shift
+    for f in "$@"; do
+        if [[ "${f}" == test/* ]]; then tests+=("${f}"); else others+=("${f}"); fi
+    done
     echo "${MY_LINE_BREAK}"
     echo -e "\033[0;36mStep: \033[0m\033[0;32m${root}\033[0m"
     (
         cd "${REPO_ROOT}/${root}" || exit 1
-        PYTHONPATH="src:${REPO_ROOT}/src:${REPO_ROOT}/test" \
-            pylint --rcfile="${REPO_ROOT}/.pylintrc" "$@"
+        pylint_step_files "" "${others[@]+"${others[@]}"}"
+        pylint_step_files "redefined-outer-name" "${tests[@]+"${tests[@]}"}"
         MYPYPATH="src:${REPO_ROOT}/src:${REPO_ROOT}/test" \
             mypy --explicit-package-bases --follow-imports=silent \
             --disable-error-code=import-untyped \
@@ -73,15 +90,22 @@ check_steps() {
     done
 }
 
-# Grep the staticcheck output for each changed file outside steps/.
+# Grep the staticcheck output for each changed python file outside steps/.
 #   $@ - repo-relative changed file paths
+# staticcheck runs over all of src/gbserver/ and exits non-zero whenever any file
+# there has an error, so make's "*** [staticcheck] Error 1" says nothing about the
+# changed files. Its stderr is captured with the output and only the changed
+# files' lines are shown. It is skipped entirely when no such file changed.
 check_src() {
-    local x output
-    output="$(make staticcheck)"
+    local x output changed=()
     for x in "$@"; do
         # Skip paths that no longer exist on disk (deleted or renamed-away files
         # still appear in `git diff --name-only`); there's nothing to report for them.
-        [[ -f "${x}" && "${x}" != steps/* ]] || continue
+        [[ -f "${x}" && "${x}" == *.py && "${x}" != steps/* ]] && changed+=("${x}")
+    done
+    [[ ${#changed[@]} -gt 0 ]] || return 0
+    output="$(make --no-print-directory staticcheck 2>&1)"
+    for x in "${changed[@]}"; do
         echo "${MY_LINE_BREAK}"
         echo -e "\033[0;36mFile: \033[0m\033[0;32m${x}\033[0m"
         echo
