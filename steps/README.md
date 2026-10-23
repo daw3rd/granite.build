@@ -8,8 +8,8 @@ Subdirectories contain step implementations (`byoc`, `dpk`, etc.), each with
 per-compute-environment subdirectories (`skypilot`, `lsf`, `k8s`, ...). Related steps
 can be grouped under a category directory (see [Nested steps](#nested-steps)). For
 example, `steps/misc/byoc/skypilot` holds the SkyPilot implementation of the `byoc`
-step in the `misc` category, and `steps/eval/eval-example/skypilot` holds the SkyPilot implementation of the
-`eval-example` step in the `eval` category.
+step in the `misc` category, and `steps/eval/eval-example/skypilot` holds the SkyPilot
+implementation of the `eval-example` step in the `eval` category.
 
 > **Audience:** step *developers* authoring and publishing step implementations.
 > If you are instead *using* steps in a `build.yaml` (referencing, configuring, or
@@ -158,9 +158,9 @@ finishes with your next steps, in order:
 The build tests can't pass until `run.sh` prints the artifact marker (see
 [Emitting data from a step](#emitting-data-from-a-step-stdout-markers)).
 
-**Existing steps.** Most steps already sit under a category (`steps/data/dpk`,
-`steps/eval/eval-example`, `steps/misc/byoc`, the `steps/distill/*` steps). `bfcl-eval`
-predates the category layout and still sits one level up, at `steps/<name>/<env>/`.
+**Existing steps.** Every step sits under a category (`steps/data/dpk`,
+`steps/eval/bfcl`, `steps/eval/eval-example`, `steps/misc/byoc`, the `steps/distill/*`
+steps). A single-level `steps/<name>/<env>/` step is still supported, but none ship today.
 
 ## Layout of a step/environment directory
 
@@ -245,8 +245,8 @@ related steps in sub-directories — e.g. `steps/distill/foo/skypilot/` — and 
 nesting is **preserved end-to-end**. The step's identity is its path relative to
 the enclosing `steps/` ancestor, minus the trailing `<env>` segment (the
 auto-derived `STEP_PATH`): `steps/distill/foo/skypilot` → `STEP_PATH = distill/foo`.
-A flat step `steps/bfcl-eval/skypilot` has `STEP_PATH = bfcl-eval`, identical to `STEP_NAME`,
-so flat steps publish byte-for-byte as before.
+A flat step `steps/foo/skypilot` has `STEP_PATH = foo`, identical to `STEP_NAME`, so
+flat steps publish byte-for-byte as before.
 
 To author a nested step, the only thing that changes is the Makefile's `include`
 depth — it must point at `steps/common.mk` from wherever the step dir lives:
