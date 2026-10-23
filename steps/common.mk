@@ -222,8 +222,8 @@ REPO_ROOT        := $(abspath $(COMMON_MK_DIR)..)
 #   STEP_ROOT = the enclosing steps/ dir (COMMON_MK_DIR points at it: it is the
 #               `../..`-style include path, one `..` per authoring level, so
 #               $(abspath) lands on steps/ regardless of nesting depth).
-#   STEP_REL  = CURDIR relative to steps/  (e.g. bfcl-eval/skypilot | misc/byoc/skypilot).
-#   STEP_PATH = STEP_REL with the final <env> segment removed (bfcl-eval | misc/byoc).
+#   STEP_REL  = CURDIR relative to steps/  (e.g. foo/skypilot | misc/byoc/skypilot).
+#   STEP_PATH = STEP_REL with the final <env> segment removed (foo | misc/byoc).
 # STEP_PATH is structural — derived from CURDIR, independent of any STEP_ENV
 # override — so it stays correct when check-published re-invokes publish-step.
 STEP_ROOT        := $(abspath $(COMMON_MK_DIR))
