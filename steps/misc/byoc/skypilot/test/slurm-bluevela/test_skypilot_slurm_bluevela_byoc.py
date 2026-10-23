@@ -28,8 +28,9 @@ Mode-1 only: ``make publish-step`` does not publish this test. Run it with::
     make -C steps/misc/byoc/skypilot test
 
 Needs ``IBM_CLOUD_API_KEY`` (for the ibmcloud secret manager) and ssh access to
-github.ibm.com (for the gb-test base). Skipped in SPS CI/CD, like the other
-BlueVela build tests.
+github.ibm.com (for the gb-test base). Set ``GBTEST_SPS_IBMCLOUD_API_KEY`` to load
+it from SPS (steps/conftest.py brings in test/conftest.py, which does that).
+Skipped in SPS CI/CD, like the other BlueVela build tests.
 """
 
 import os
@@ -53,7 +54,7 @@ pytestmark = pytest.mark.ibm
 )
 @pytest.mark.skipif(
     not os.environ.get("IBM_CLOUD_API_KEY"),
-    reason="IBM_CLOUD_API_KEY is required by the custom test space's ibmcloud secret manager",
+    reason="IBM_CLOUD_API_KEY (set GBTEST_SPS_IBMCLOUD_API_KEY) is required by the custom test space's ibmcloud secret manager",
 )
 class TestSkypilotSlurmBlueVelaByoc(AbstractYamlBuildRunnerTest):
     """byoc clones a public repo and runs a command end to end on BlueVela SLURM."""

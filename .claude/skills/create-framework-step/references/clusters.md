@@ -11,7 +11,7 @@ For a variant on the same cluster, suffix the dir: `slurm-pii`, `aws-tok`.
 | `aws` | `space://environments/skypilot/aws` | `../../space` | `pytest.mark.skypilot_integration` | `aws_credentials_present()` from `gbserver.environment.skypilot` | export AWS creds | Real EC2 (costs money). `hf://` pull is **inline** (no extra step). Custom-image steps OK (image must be in a pullable registry). |
 | `kube` | `space://environments/skypilot/kubernetes/local` | `../../space` | `pytest.mark.skypilot_integration` | `kind_cluster_reachable()`, reason `kind_skip_reason()`, plus `@KUBE_XDIST_GROUP` (all from `libgbtest.kube`) | `test-setup-kube` → `$(MAKE) -C $(REPO_ROOT) kube-setup` | Local kind cluster. Shared volume at `/shared`. hfpull is separate. |
 | `lsf-bluevela` | `space://environments/skypilot/lsf/ibm-bluevela` | `../../space` | `pytest.mark.ibm` | `RUNNING_IN_CICD` skip (see below) + `@pytest.mark.xdist_group(name="buildtest_bv")` | `~/.ssh/ibm-bluevela.key` locally | IBM infra through the local space, so still `ibm`. Enroot for images. |
-| `slurm-bluevela` | `space://environments/skypilot/slurm/bluevela` | `.` (custom test space: `test-data/slurm-bluevela/space.yaml`, see below) | `pytest.mark.ibm` | same as `lsf-bluevela`, plus an `IBM_CLOUD_API_KEY` skip | `IBM_CLOUD_API_KEY` exported | The env exists only in gb-test, and its SSH key is an `ibmcloud` secret, so the fixture dir carries its own `space.yaml`. The step still resolves from **your source**. Mode-1 only: not published. CPU-only steps need `zone: cpu` + `launcher_config.sbatch_options.constraint: null` (gpu-mid rejects GPU-less jobs). Shared partition queueing, so use a long `timeout_minutes` and the timeout override. hfpull is separate. |
+| `slurm-bluevela` | `space://environments/skypilot/slurm/bluevela` | `.` (custom test space: `test-data/slurm-bluevela/space.yaml`, see below) | `pytest.mark.ibm` | same as `lsf-bluevela`, plus an `IBM_CLOUD_API_KEY` skip | `GBTEST_SPS_IBMCLOUD_API_KEY` set (`make ibm-venv`) | The env exists only in gb-test, and its SSH key is an `ibmcloud` secret, so the fixture dir carries its own `space.yaml`. The step still resolves from **your source**. Mode-1 only: not published. CPU-only steps need `zone: cpu` + `launcher_config.sbatch_options.constraint: null` (gpu-mid rejects GPU-less jobs). Shared partition queueing, so use a long `timeout_minutes` and the timeout override. hfpull is separate. |
 
 **`hf://` outputs, on every cluster.** Each one is pushed by its own hfpush step, so the
 run needs an `HF_TOKEN` that can write `GBTEST_HF_PUSH_ORG` (default `ibm-research`;
@@ -76,12 +76,14 @@ base_uris:
   - file://../../space
 ```
 
-The test needs this skip, since step tests don't load `test/conftest.py`'s SPS setup:
+`steps/conftest.py` loads the repo's `test/conftest.py`, so `GBTEST_SPS_IBMCLOUD_API_KEY`
+fills in `IBM_CLOUD_API_KEY` from SPS. Add this skip so a run without it skips instead of
+failing:
 
 ```python
 @pytest.mark.skipif(
     not os.environ.get("IBM_CLOUD_API_KEY"),
-    reason="IBM_CLOUD_API_KEY is required by the custom test space's ibmcloud secret manager",
+    reason="IBM_CLOUD_API_KEY (set GBTEST_SPS_IBMCLOUD_API_KEY) is required by the custom test space's ibmcloud secret manager",
 )
 ```
 

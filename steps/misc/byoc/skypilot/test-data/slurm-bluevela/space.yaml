@@ -10,8 +10,9 @@
 # Using this space requires:
 #   IBM_CLOUD_API_KEY
 #   passwordless ssh access to github.ibm.com
-# Step tests don't load test/conftest.py, so GBTEST_SPS_IBMCLOUD_API_KEY does NOT
-# fill these in here: export IBM_CLOUD_API_KEY yourself.
+# Shortcut: set GBTEST_SPS_IBMCLOUD_API_KEY instead. steps/conftest.py loads the
+# repo's test/conftest.py, which uses it to load IBM_CLOUD_API_KEY (and the other
+# required env vars) from SPS. Needs `make ibm-venv`.
 #
 # The step under test comes from your LOCAL source: the generated ../../space is
 # a base below, and `make space` also links ./steps to ../../space/steps
