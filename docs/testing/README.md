@@ -170,7 +170,10 @@ make staticcheck   # pylint + mypy on src/gbserver/
 make lint          # full check-mode lint across src/gbserver, src/gbcli, src/gbcommon
 ```
 
-`make xformat` / `make xcheck` limit formatting/typecheck to files changed against the `dev` branch.
+`make xformat` / `make xcheck` limit formatting/typecheck to files changed against the `main` branch. `make xcheck` also
+checks changed python files under `steps/`, running pylint + mypy separately from each step's root (the directory holding
+`step-template.yaml`) with the step's `src/`, the repo `src/` and `test/` on the import path. Imports of a step's
+runtime-only dependencies (torch, transformers, ...) that aren't installed in the dev venv are not reported.
 
 ## Test layout
 

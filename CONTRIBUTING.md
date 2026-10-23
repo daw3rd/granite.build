@@ -71,7 +71,7 @@ Format and lint only files changed relative to `dev` (recommended before PRs):
 
 ```bash
 make xformat    # isort + black on changed files
-make xcheck     # pylint + mypy on changed files
+make xcheck     # pylint + mypy on changed files (src/gbserver/ and steps/)
 ```
 
 Format or check the entire codebase:
