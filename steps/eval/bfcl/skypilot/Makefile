@@ -14,7 +14,7 @@ STEP_NAME := bfcl-eval
 # the layers to build there, and treat the first push as unproven.
 REGISTRY ?= quay.io/your-org
 
-include ../../common.mk
+include ../../../common.mk
 
 # ADDITIVE, not an override of common.mk's `test` (which depends on `space image`, i.e. a
 # multi-GB torch+vLLM build plus a repo-root .venv, just to run pure-python unit tests).
@@ -36,7 +36,7 @@ include ../../common.mk
 # next (both measured, one per run). Naming them as `--with` flags here would be chasing a
 # set one element at a time, and the set is already written down in pyproject.toml, so
 # test/conftest.py skips that directory when the harness does not import. Run the per-cluster
-# tests through the sanctioned route instead — `make -C ../../.. venv` then `make test`, or
+# tests through the sanctioned route instead — `make -C ../../../.. venv` then `make test`, or
 # `.venv/bin/python -m pytest test` — where they collect and report their own four gates as
 # skips (measured: 57 passed, 5 skipped here vs 57 passed, 7 skipped there).
 .PHONY: unit-tests

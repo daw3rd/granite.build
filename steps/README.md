@@ -159,8 +159,8 @@ The build tests can't pass until `run.sh` prints the artifact marker (see
 [Emitting data from a step](#emitting-data-from-a-step-stdout-markers)).
 
 **Existing steps.** Most steps already sit under a category (`steps/data/dpk`,
-`steps/eval/eval-example`, the `steps/distill/*` steps). `byoc` and `bfcl-eval` predate
-the category layout and still sit one level up, at `steps/<name>/<env>/`.
+`steps/eval/eval-example`, `steps/eval/bfcl`, the `steps/distill/*` steps). `byoc` predates
+the category layout and still sits one level up, at `steps/<name>/<env>/`.
 
 ## Layout of a step/environment directory
 
