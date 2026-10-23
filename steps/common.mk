@@ -30,7 +30,7 @@
 #                 before `make test`; it is deliberately NOT a prerequisite of
 #                 `test`. common.mk supplies a no-op default; a step overrides it
 #                 (see HAS_TEST_SETUP below)
-#   clean         remove the generated Space directory
+#   clean         remove the generated Space directory (and custom test spaces' steps links)
 #   help          list the targets and point at the shared steps/README.md
 #
 # Variables an includer MUST/MAY set BEFORE the include:
@@ -468,6 +468,29 @@ space:
 		printf 'variables:\n  DEFAULT_ENVIRONMENT: %s\n' "$(DEFAULT_ENVIRONMENT)" >> $(SPACE_DIR)/space.yaml; \
 	fi
 	@echo "[$(STEP_NAME)] wrote Space $(SPACE_DIR)/ (step space://steps/$(STEP_PATH); base_uri $(SPACE_BASE_URI); image_ref='$(IMAGE_REF)')"
+	$(call link-custom-space-steps)
+
+# link-custom-space-steps — give each custom test space (a test-data/<cluster>/
+# holding its own space.yaml; see "Custom test spaces" in steps/README.md) a
+# `steps` symlink to the generated $(SPACE_DIR)/steps. The fixture dir is that
+# space's root (base_uris[0]), and only the space root's own steps/ outrank
+# every base_uri when space://steps/$(STEP_PATH) resolves. Without the link, a
+# published copy of this step in a base (e.g. configurations/assets) could win
+# over the local source under test. The link is generated, hence git-ignored
+# (steps/.gitignore). A real (non-link) steps/ there is refused rather than
+# overwritten.
+define link-custom-space-steps
+	@for f in test-data/*/space.yaml; do \
+		[ -f "$$f" ] || continue; \
+		link="$$(dirname "$$f")/steps"; \
+		if [ -e "$$link" ] && [ ! -L "$$link" ]; then \
+			echo "[$(STEP_NAME)] ERROR: $$link exists and is not a symlink; remove it so it can link to $(SPACE_DIR)/steps." >&2; \
+			exit 1; \
+		fi; \
+		ln -sfn "../../$(SPACE_DIR)/steps" "$$link"; \
+		echo "[$(STEP_NAME)] linked custom test space $$link -> ../../$(SPACE_DIR)/steps"; \
+	done
+endef
 
 # ---- Publish ---------------------------------------------------------------
 
@@ -527,6 +550,7 @@ publish-step:
 	@mkdir -p "$(PUBLISH_TEST_DIR)" "$(PUBLISH_TESTDATA_DIR)"
 	@copied=0; for d in $(TEST_DIR)/*/; do \
 		[ -d "$$d" ] || continue; \
+		$(call skip-if-custom-space,$$d); \
 		cp -R "$${d%/}" "$(PUBLISH_TEST_DIR)/"; copied=1; \
 	done; \
 	if [ "$$copied" = 0 ]; then \
@@ -535,6 +559,7 @@ publish-step:
 	@if [ -d test-data ]; then \
 		for d in test-data/*/; do \
 			[ -d "$$d" ] || continue; \
+			$(call skip-if-custom-space,$$d,quiet); \
 			cp -R "$${d%/}" "$(PUBLISH_TESTDATA_DIR)/"; \
 		done; \
 	fi
@@ -548,6 +573,23 @@ publish-step:
 	@echo "[$(STEP_NAME)] published step -> $(PUBLISH_STEP_DIR)"
 	@echo "[$(STEP_NAME)] copied build tests -> $(PUBLISH_TEST_DIR)"
 	@echo "[$(STEP_NAME)] copied fixtures   -> $(PUBLISH_TESTDATA_DIR) (space_uri -> $(MODE2_SPACE_URI))"
+
+# skip-if-custom-space — a SHELL FRAGMENT for publish-step's copy loops: `continue`
+# past a per-cluster dir whose fixture dir test-data/<cluster>/ holds its own
+# space.yaml (a custom test space; see "Custom test spaces" in steps/README.md).
+# Such a test is Mode-1 only: its space chains to the locally generated
+# $(SPACE_DIR)/ by a relative base_uri, and publish-step's space_uri rewrite would
+# drop the space's custom secret_manager/base_uris, so neither the test nor its
+# fixtures are copied. $(1) is the loop's dir (test/<cluster>/ or
+# test-data/<cluster>/); a non-empty $(2) suppresses the message, so each skipped
+# cluster is reported once (by the test/ loop).
+define skip-if-custom-space
+	c=$$(basename "$(1)"); \
+	if [ -f "test-data/$$c/space.yaml" ]; then \
+		$(if $(2),:,echo "[$(STEP_NAME)] skipped $$c: test-data/$$c/space.yaml is a custom test space (Mode-1 only, not published)"); \
+		continue; \
+	fi
+endef
 
 # ---- Drift check -----------------------------------------------------------
 
@@ -725,3 +767,4 @@ endif
 
 clean:
 	rm -rf $(SPACE_DIR)
+	@for l in test-data/*/steps; do [ -L "$$l" ] && rm -f "$$l"; done; true

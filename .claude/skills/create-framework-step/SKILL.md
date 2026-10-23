@@ -122,7 +122,10 @@ like `items` or `keys`, suggest another name, or read it as
   `test_<env>_<cluster>[_<variant>]_<category>_<name>.py`, with every hyphen
   turned into an underscore (`test_skypilot_slurm_bluevela_text_norm.py`).
 - Every build test gets `@extended_testing_only` and a skip gate for its infrastructure.
-- Mode-1 fixtures use `space_uri: ../../space`; `publish-step` rewrites it.
+- Mode-1 fixtures use `space_uri: ../../space`; `publish-step` rewrites it. A cluster that
+  needs a different secret manager or bases (e.g. `slurm-bluevela`) gets a custom test
+  space instead: `test-data/<cluster>/space.yaml` + `space_uri: .` (see clusters.md).
+  Those tests are Mode-1 only; `publish-step` skips them.
 - **A fixture whose `space_uri` points at `github.ibm.com` gets
   `pytestmark = pytest.mark.ibm`.** So does a test on an IBM-only cluster (BlueVela) that uses the
   local space. A remote `space_uri` is copied through publish unchanged, and it resolves

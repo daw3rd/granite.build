@@ -603,7 +603,45 @@ test `pytestmark = pytest.mark.ibm`. `publish-step` copies a **remote** `space_u
 only local ones: a bare path or a `file://` URI. In both modes, a remote-space test resolves
 `space://steps/<name>` from the remote space, so it exercises the step that space
 has, **not** your local source: publish the step to that space's assets before relying
-on it.
+on it. To test your local source on such a cluster instead, use a custom test space
+(below).
+
+### Custom test spaces
+
+The generated `space/` always uses `secret_manager: type: local` and chains only to
+`configurations/assets`. When one cluster needs a different space — e.g. BlueVela SLURM,
+whose environment lives only in gb-test and needs the `ibmcloud` secret manager for its
+`IdentityKey: BV_SSH_PRIVATE_KEY` — put a `space.yaml` **in the fixture dir, beside
+`buildtest.yaml`**, and set `space_uri: .`. The fixture dir then *is* the space (the
+loader reads its one `space.yaml` and ignores `build.yaml`/`buildtest.yaml`). Example:
+[`misc/byoc/skypilot/test-data/slurm-bluevela/`](misc/byoc/skypilot/test-data/slurm-bluevela/).
+
+```
+test-data/<cluster>/
+  build.yaml
+  buildtest.yaml   # space_uri: .
+  space.yaml       # checked in; your secret_manager + base_uris
+  steps -> ../../space/steps   # symlink made by `make space` (git-ignored)
+```
+
+* **The step still comes from your local source.** `make space` (so `make test`) links
+  the fixture's `steps` to the generated `space/steps`. The space root's own `steps/`
+  outranks every `base_uri`, so a copy of the step in gb-test or `configurations/assets`
+  can't shadow it. `make clean` removes the link.
+* **`base_uris` are not inherited** from the generated space; list every base the test
+  needs (e.g. the gb-test git URI, and `file://../../space` for the generated space).
+  The generated space's own base (`configurations/assets`) is not followed.
+* **BlueVela spaces mirror the IBM space**, `configurations/spaces/ibm/space.yaml`
+  (same secret manager and git bases), with its `file://` base replaced by the
+  generated space, `file://../../space`. Keep them in sync.
+* **Never put secrets in it.** The `ibmcloud` API key comes from `IBM_CLOUD_API_KEY`.
+  Step tests don't load `test/conftest.py`, so export it yourself; skip the test when
+  it's unset.
+* **Mode-1 only.** `make publish-step` skips any cluster whose fixture dir has a
+  `space.yaml` (the test and its fixtures), because the rewritten `space_uri` would
+  drop the custom space.
+* Keep the fixture dir free of any other `space.yaml` or `store.yaml`; the loader
+  reads them from the whole space dir.
 
 > **Image steps: keep the published image tag and your local build in sync.** For a
 > custom-image step, `make publish-step` freezes a concrete image reference into the
