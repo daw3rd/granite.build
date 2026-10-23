@@ -31,7 +31,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: dataset
       steps:
-        - step_uri: space://steps/bfcl-eval
+        - step_uri: space://steps/eval/bfcl
           config:
             # Short poll for a smoke run: the step's own default is 900s, sized for a
             # full-corpus run measured in hours.

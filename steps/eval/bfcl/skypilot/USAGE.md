@@ -49,38 +49,33 @@ with nothing registered.
 
 ```yaml
 steps:
-  - step_uri: space://steps/bfcl-eval
+  - step_uri: space://steps/eval/bfcl
 ```
 
-### That URI does not resolve here yet — two older copies shadow it
+### The legacy `space://steps/bfcl-eval` is a different step
 
-**Authoring this step is not the same as switching the pipeline over to it, and the
-difference is invisible in a build.yaml.** `space://steps/<name>` resolves by walking *up*
-from the active environment directory, **nearest-wins**
-(`gbcommon/uri/space.py::_walk_colocated_steps`). `make publish-step` writes this step
-env-nested at `configurations/assets/environments/skypilot/steps/bfcl-eval` — but two
-cluster-nested copies of the same name already sit *nearer* to their environments:
+`make publish-step` writes this step env-nested at
+`configurations/assets/environments/skypilot/steps/eval/bfcl`, so it resolves as
+`space://steps/eval/bfcl`. Two older cluster-nested copies keep the legacy URI
+`space://steps/bfcl-eval`, and recipes that name it keep getting them:
 
 | Published asset | Image it names |
 |---|---|
 | `environments/skypilot/lsf/ibm-bluevela/steps/bfcl-eval` | `us.icr.io/cil15-shared-registry/bfcl-py311:0.02` |
 | `environments/skypilot/aws/steps/bfcl-eval` | `022767362696.dkr.ecr.us-east-2.amazonaws.com/granite-build/bfcl-py311:0.02` |
 
-So on **`ibm-bluevela`** — the cluster this step is for — `space://steps/bfcl-eval` keeps
-resolving to the ICR image, published or not. Both shadowing copies name a **private**
-registry, which is the reason this step exists.
+Both name a **private** registry, which is the reason this step exists.
 
-Switching over takes two steps in this order, and the first one needs credentials nobody
-authoring this step had:
+Switching a recipe over takes two steps in this order, and the first one needs credentials
+nobody authoring this step had:
 
 1. `make image publish-image REGISTRY=<public-registry>/<org>`, then `make publish-step`
    (which **refuses** until that image is actually pullable — `PUBLISH_REQUIRE_IMAGE`).
-2. Retire the shadowing copy for whichever cluster you are switching: delete its directory,
-   or repoint its `image_id` at the now-public image.
+2. Change the recipe's `step_uri` from `space://steps/bfcl-eval` to `space://steps/eval/bfcl`.
 
-Doing 2 before 1 does not degrade gracefully — it resolves the target to an image that does
-not exist, which fails at run time rather than at render time. Until both are done, treat
-this directory as the reviewable public **source** of the step, not as what the recipe runs.
+Doing 2 before 1 fails at resolve time: until the step is published, `space://steps/eval/bfcl`
+names nothing in the committed assets tree. Until both are done, treat this directory as the
+reviewable public **source** of the step, not as what the recipe runs.
 
 ## Config contract (`bfcl_config`)
 
@@ -160,7 +155,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: dataset
       steps:
-        - step_uri: space://steps/bfcl-eval
+        - step_uri: space://steps/eval/bfcl
           config:
             poll_interval_seconds: 900
             log_retrieval_interval_seconds: 900
@@ -193,9 +188,9 @@ In a distillation pipeline this target binds to the export step instead of decla
 - **The image must exist before a build runs.** The cluster *pulls* the reference frozen
   into the step at `make space` time. No image has been published for this step yet — see
   [README.md](README.md).
-- **Publishing this step does not make `space://steps/bfcl-eval` mean this step.** Two
-  cluster-nested copies naming private registries resolve first, `ibm-bluevela`'s among them
-  — see [That URI does not resolve here yet](#that-uri-does-not-resolve-here-yet--two-older-copies-shadow-it).
+- **This step is `space://steps/eval/bfcl`, not `space://steps/bfcl-eval`.** The legacy
+  URI still names the cluster-nested copies on private registries — see
+  [The legacy `space://steps/bfcl-eval` is a different step](#the-legacy-spacestepsbfcl-eval-is-a-different-step).
 - **`num_gpus_generate` is not a request for GPUs.** It sets vLLM's tensor-parallel size;
   the GPUs themselves come from the target's `launcher_config.resources`. Setting it higher
   than the target requests fails at server start.

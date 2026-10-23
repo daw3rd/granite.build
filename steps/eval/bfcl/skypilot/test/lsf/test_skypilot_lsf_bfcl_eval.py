@@ -19,7 +19,7 @@
 A **step-level** test, beside the step's Makefile in a per-cluster subdir with its
 fixtures in the matching ``test-data/lsf/``. Run it from the step directory::
 
-    GB_STEP_BLUEVELA_BUILD=1 make -C steps/bfcl-eval/skypilot test
+    GB_STEP_BLUEVELA_BUILD=1 make -C steps/eval/bfcl/skypilot test
 
 The fixture is a single target: serve a pre-existing 3B granite checkpoint from /proj with
 vLLM, generate the BFCL ``simple`` category, score it, register the score file. Unlike the
@@ -69,7 +69,7 @@ _BV_KEY = os.environ.get("BV_SSH_KEY", "~/.ssh/ibm-bluevela.key")
 # The offline tests (test_step_template.py, test_run_bfcl.py, and the tool-call repair and
 # id-selection tests) cover the step's contracts and always run; this one is deliberate:
 #
-#     GB_STEP_BLUEVELA_BUILD=1 make -C steps/bfcl-eval/skypilot test
+#     GB_STEP_BLUEVELA_BUILD=1 make -C steps/eval/bfcl/skypilot test
 #
 # The repository suites gate it by marker instead (`-m "not ibm"`), so this does not change
 # how CI selects it.
@@ -157,8 +157,8 @@ class TestSkypilotLsfBfclEval(AbstractYamlBuildRunnerTest):
         # Fixtures resolve through the repo's test/ <-> test-data/ helper, which
         # keys off the first `test/` segment so this works from both homes of the
         # file (see steps/README.md, "Two test modes"):
-        #   Mode 1 (authoring)  steps/bfcl-eval/skypilot/test/lsf/
-        #       -> steps/bfcl-eval/skypilot/test-data/lsf/   (co-located)
-        #   Mode 2 (published)  test/steps/bfcl-eval/skypilot/lsf/
-        #       -> test-data/steps/bfcl-eval/skypilot/lsf/   (parallel tree)
+        #   Mode 1 (authoring)  steps/eval/bfcl/skypilot/test/lsf/
+        #       -> steps/eval/bfcl/skypilot/test-data/lsf/   (co-located)
+        #   Mode 2 (published)  test/steps/eval/bfcl/skypilot/lsf/
+        #       -> test-data/steps/eval/bfcl/skypilot/lsf/   (parallel tree)
         return get_test_data_dir_for(__file__)
