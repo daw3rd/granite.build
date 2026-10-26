@@ -17,7 +17,7 @@
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, List, Optional, Self, Tuple
+from typing import Dict, Iterator, List, Optional, Self, Tuple
 from urllib.parse import ParseResult, unquote, urlparse
 
 import yaml
@@ -746,9 +746,48 @@ class SpaceURI(URI):
         if base_path is None or not base_path.exists():
             return
         rel = SpaceURI._env_rel_in(base_path, env_path, env_rel)
-        for cand in base_path.rglob(f"{STEPS_PREFIX}**/{name}/{STEP_FILE_NAME}"):
-            if cand.is_file() and SpaceURI._steps_dir_admits_env(base_path, cand, rel):
+        for cand in SpaceURI._step_index(base_path).get(name, ()):
+            if SpaceURI._steps_dir_admits_env(base_path, cand, rel):
                 yield base_path, cand
+
+    @staticmethod
+    def _step_index(base_path: Path) -> Dict[str, List[Path]]:
+        """Return every step in a base, keyed by each name it can be asked for.
+
+        Walks the base once for ``steps/**/step.yaml`` and keys each file by
+        every name a ``steps/**/<name>/step.yaml`` glob would match it under:
+        each trailing run of folders below a ``steps`` segment, since ``**`` can
+        skip env-partition dirs between ``steps/`` and the name (e.g.
+        ``steps/skypilot/command`` is indexed as ``skypilot/command`` and
+        ``command``).  Built once per base
+        and kept for the thread's lookups (:meth:`set_baseuris` clears it), so
+        the name pin, the candidate search and every sub-file URI share one walk
+        instead of re-globbing the tree.
+
+        Args:
+            base_path: The base's local directory.
+
+        Returns:
+            Name → step.yaml paths, sorted for a deterministic order.
+        """
+        cache = SpaceURI._thread_local.__dict__.setdefault("step_index", {})
+        key = str(base_path)
+        if key in cache:
+            return cache[key]
+        index: Dict[str, List[Path]] = {}
+        steps = STEPS_PREFIX.rstrip("/")
+        for found in sorted(base_path.rglob(f"{STEPS_PREFIX}**/{STEP_FILE_NAME}")):
+            if not found.is_file():
+                continue
+            parts = found.parent.relative_to(base_path).parts
+            if steps not in parts:
+                continue
+            below = parts[parts.index(steps) + 1 :]
+            names = {"/".join(below[i:]) for i in range(len(below))}
+            for name in names:
+                index.setdefault(name, []).append(found)
+        cache[key] = index
+        return index
 
     @staticmethod
     def _env_rel_in(
@@ -972,6 +1011,8 @@ class SpaceURI(URI):
     def set_baseuris(cls, base_uris: List[str], space_secrets: dict):
         cls._thread_local.space_secrets = space_secrets
         cls._thread_local.base_uris = base_uris
+        # New bases (a new space): drop the per-base step index.
+        cls._thread_local.step_index = {}
 
     @classmethod
     @contextmanager
