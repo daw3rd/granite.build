@@ -991,7 +991,8 @@ class SpaceURI(URI):
           repo base and ``<clone>/<subdir>`` for a sub-path.
 
         This lets the space-root lookup, the env-class-match glob and the
-        fallback guards operate on local files for git-backed spaces.  Non-local, non-git URIs (or a git URI whose clone fails) return
+        fallback guards operate on local files for git-backed spaces.
+        Non-local, non-git URIs (or a git URI whose clone fails) return
         ``None`` — callers treat that as "can't inspect" and skip/admit.
 
         Args:

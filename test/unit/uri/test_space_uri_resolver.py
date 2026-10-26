@@ -866,7 +866,8 @@ class TestEnvClassMatch:
         null-valued, single-env file, letting the less-specific multi-env catch-all
         win here — disagreeing with the sibling ``_env_ok`` gate. With presence
         decided by key, the null-valued split file (1 key) beats the catch-all.
-        The class match must decide (no env dir, so no space-root lookup, and the fallback never runs).
+        The class match must decide (no env dir, so no space-root lookup, and the
+        fallback never runs).
         """
         base = tmp_path / "base"
         _write_step(
