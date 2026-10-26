@@ -249,6 +249,46 @@ class TestBaseOrder:
 
         assert _resolved_dir(resolved).samefile(catalog)
 
+    def test_nested_bases_measure_env_from_each_base(self, tmp_path):
+        """With nested bases (``<repo>`` and ``<repo>/configurations/assets``),
+        the outer base sees the env at its own relative path, so the family's
+        step under the assets tree serves the env and outranks the outer base's
+        top-level catalog copy."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        repo = tmp_path / "repo"
+        assets = repo / "configurations" / "assets"
+        family = _write_step(
+            assets / "environments" / "skypilot" / "steps" / "digit", ["Skypilot"]
+        )
+        _write_step(repo / "steps" / "digit", env_classes=["Skypilot"])
+        env_dir = assets / "environments" / "skypilot" / "slurm"
+        env_dir.mkdir(parents=True)
+        _set_bases(space_root, repo, assets)
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/digit")
+
+        assert _resolved_dir(resolved).samefile(family)
+
+    def test_sibling_env_nested_step_does_not_pin_the_name(self, tmp_path):
+        """A nested ``distill/foo`` that exists only in a sibling env's folder
+        doesn't fix the step name: the env's own family ``distill`` step serves
+        ``space://steps/distill/foo`` with ``foo`` as its sub-file."""
+        base = tmp_path / "assets"
+        family = base / "environments" / "skypilot"
+        outer = _write_step(family / "steps" / "distill", env_classes=["Skypilot"])
+        (outer / "foo").write_text("sub-file\n")
+        _write_step(family / "aws" / "steps" / "distill" / "foo", ["Skypilot"])
+        env_dir = family / "lsf"
+        env_dir.mkdir(parents=True)
+        _set_bases(base)
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/distill/foo")
+
+        assert _resolved_dir(resolved).samefile(outer / "foo")
+
     def test_family_steps_in_another_base_serve_the_env(self, tmp_path):
         """A family's shared ``environments/skypilot/steps/`` serves a skypilot
         env loaded from a different base: ownership is compared by path inside

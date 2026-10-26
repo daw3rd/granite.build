@@ -605,7 +605,8 @@ class SpaceURI(URI):
         if not env_class:
             return None
         bases = SpaceURI._step_search_bases()
-        pinned = SpaceURI._longest_step_in_bases(after, bases)
+        env_path = SpaceURI._active_env_path()
+        pinned = SpaceURI._longest_step_in_bases(after, bases, env_path, env_rel)
         if pinned is None:
             return None
         name, rest = pinned
@@ -615,6 +616,7 @@ class SpaceURI(URI):
                 name=name,
                 env_class=env_class,
                 env_subtype=env_subtype,
+                env_path=env_path,
                 env_rel=env_rel,
             )
             if matches:
@@ -661,7 +663,10 @@ class SpaceURI(URI):
 
     @staticmethod
     def _longest_step_in_bases(
-        after: str, bases: List[str]
+        after: str,
+        bases: List[str],
+        env_path: Optional[Path],
+        env_rel: Optional[Tuple[str, ...]],
     ) -> Optional[Tuple[str, str]]:
         """Pin the step name by ``step.yaml`` existence across all base_uris.
 
@@ -684,15 +689,20 @@ class SpaceURI(URI):
         part of a canonical name — it belongs to a crafted ``rest`` and is caught
         by the containment guard, and this also keeps ``..`` out of the glob).
 
-        Like ``_longest_step_in_root`` this is a pure *existence* probe: the
-        env/class gate is applied by the caller to the fixed name only.  Keeping
-        name selection orthogonal to the env gate is what stops a
-        present-but-env-excluded nested step from being demoted to
+        Only ``steps/`` folders the env can see count
+        (:meth:`_visible_step_yamls`): a nested step that exists only in a
+        sibling env's folder doesn't fix the name, so ``distill/foo`` there
+        leaves the env's own ``distill`` step (with ``foo`` as a sub-file)
+        reachable.  Otherwise this is an *existence* probe: the class gate is
+        applied by the caller to the fixed name only, which is what stops a
+        visible but class-excluded nested step from being demoted to
         ``outer-step + rest`` — matching the space-root and fallback lookups.
 
         Args:
             after: The URI suffix with the leading ``steps/`` stripped.
             bases: The bases to probe (:meth:`_step_search_bases`).
+            env_path: The active env's dir, or ``None``.
+            env_rel: The env dir's path in its innermost base (:meth:`_env_rel_parts`).
 
         Returns:
             ``(name, rest)`` for the longest prefix of ``after`` that names a
@@ -702,24 +712,68 @@ class SpaceURI(URI):
             if ".." in name.split("/"):
                 continue
             for base_uri in bases:
-                base_path = SpaceURI._uri_to_local_path(base_uri)
-                if base_path is None or not base_path.exists():
-                    continue
-                # Anchor to the enclosing ``steps/`` — the invariant is that a
-                # canonical name is relative to a ``steps/`` ancestor.  An
-                # unanchored ``<name>/step.yaml`` would reach into sub-asset
-                # territory and let a stray ``step.yaml`` outside any ``steps/``
-                # (e.g. a test fixture) hijack an existing sub-asset URI.  The
-                # ``**`` tolerates env-partition dirs *between* ``steps/`` and the
-                # name, as builtin steps are laid out ``steps/<env-class>/<name>/``
-                # (``src/gbserver/builtins/steps/skypilot/command/``) — anchoring
-                # straight to ``steps/<name>`` made every builtin unresolvable.
-                for cand in base_path.rglob(
-                    f"{STEPS_PREFIX}**/{name}/{STEP_FILE_NAME}"
+                for _ in SpaceURI._visible_step_yamls(
+                    base_uri, name, env_path, env_rel
                 ):
-                    if cand.is_file():
-                        return name, rest
+                    return name, rest
         return None
+
+    @staticmethod
+    def _visible_step_yamls(
+        base_uri: str,
+        name: str,
+        env_path: Optional[Path],
+        env_rel: Optional[Tuple[str, ...]],
+    ) -> Iterator[Tuple[Path, Path]]:
+        """Yield ``(base_path, step_yaml)`` for each copy of ``name`` the env can see.
+
+        Globs ``<base>/steps/**/<name>/step.yaml``, anchored to the enclosing
+        ``steps/`` — a canonical name is relative to a ``steps/`` ancestor, so an
+        unanchored ``<name>/step.yaml`` could let a stray ``step.yaml`` outside
+        any ``steps/`` (e.g. a test fixture) hijack a sub-asset URI.  The ``**``
+        tolerates env-partition dirs *between* ``steps/`` and the name, as
+        builtin steps are laid out ``steps/<env-class>/<name>/``.  Each copy's
+        ``steps/`` folder must serve the env (:meth:`_steps_dir_admits_env`),
+        with the env's path measured from this base when it encloses the env.
+
+        Args:
+            base_uri: The base to glob.
+            name: Candidate step name (may be multi-segment).
+            env_path: The active env's dir, or ``None``.
+            env_rel: The env dir's path in its innermost base.
+        """
+        base_path = SpaceURI._uri_to_local_path(base_uri)
+        if base_path is None or not base_path.exists():
+            return
+        rel = SpaceURI._env_rel_in(base_path, env_path, env_rel)
+        for cand in base_path.rglob(f"{STEPS_PREFIX}**/{name}/{STEP_FILE_NAME}"):
+            if cand.is_file() and SpaceURI._steps_dir_admits_env(base_path, cand, rel):
+                yield base_path, cand
+
+    @staticmethod
+    def _env_rel_in(
+        base_path: Path, env_path: Optional[Path], env_rel: Optional[Tuple[str, ...]]
+    ) -> Optional[Tuple[str, ...]]:
+        """Return the env dir's path as seen from ``base_path``.
+
+        When this base encloses the env, the path is measured from it, so nested
+        bases agree: with ``[<repo>, <repo>/configurations/assets]`` the outer
+        base sees ``configurations/assets/environments/skypilot/slurm`` and its
+        ``configurations/assets/environments/skypilot/steps/`` serves the env.
+        Otherwise (another repo) the path from the env's innermost base is used,
+        so a family's steps in one repo serve that family's env from another.
+
+        Args:
+            base_path: The base's local directory.
+            env_path: The active env's resolved dir, or ``None``.
+            env_rel: The env dir's path in its innermost base, or ``None``.
+        """
+        if env_path is None:
+            return env_rel
+        root = base_path.resolve()
+        if env_path == root or root in env_path.parents:
+            return env_path.relative_to(root).parts
+        return env_rel
 
     @staticmethod
     def _env_rel_parts() -> Optional[Tuple[str, ...]]:
@@ -799,6 +853,7 @@ class SpaceURI(URI):
         name: str,
         env_class: str,
         env_subtype: Optional[str],
+        env_path: Optional[Path],
         env_rel: Optional[Tuple[str, ...]],
     ) -> List:
         """Collect env-class-matching ``step.yaml`` candidates for one name.
@@ -826,8 +881,9 @@ class SpaceURI(URI):
             name: Candidate step name (may be multi-segment, e.g. ``distill/foo``).
             env_class: Active env class name.
             env_subtype: Active env sub-type, or ``None``.
-            env_rel: The env dir's base-relative path (:meth:`_env_rel_parts`),
-                computed once per lookup by the caller.
+            env_path: The active env's dir, or ``None``.
+            env_rel: The env dir's path in its innermost base
+                (:meth:`_env_rel_parts`), computed once per lookup by the caller.
 
         Returns:
             ``(-owner_depth, specificity, path-str, path)`` tuples, so the
@@ -836,14 +892,9 @@ class SpaceURI(URI):
             env_configs key count (fewer = more env-specific); possibly empty.
         """
         matches: List = []
-        base_path = SpaceURI._uri_to_local_path(base_uri)
-        if base_path is None or not base_path.exists():
-            return matches
-        for cand in base_path.rglob(f"{STEPS_PREFIX}**/{name}/{STEP_FILE_NAME}"):
-            if not cand.is_file() or not SpaceURI._steps_dir_admits_env(
-                base_path, cand, env_rel
-            ):
-                continue
+        for base_path, cand in SpaceURI._visible_step_yamls(
+            base_uri, name, env_path, env_rel
+        ):
             try:
                 with open(cand, "r", encoding="utf-8") as f:
                     data = yaml.safe_load(f) or {}
