@@ -55,15 +55,20 @@ class SpaceURI(URI):
         elif uristr.startswith(SPACE_SCHEME):
             uri_suffix = uristr.removeprefix(SPACE_SCHEME + "://")
         SpaceURI._reject_parent_segments(uri_suffix, uristr)
-        # Steps: only copies that admit the active env (class and ``subtypes``)
-        # are candidates, and base_uris order decides between them — the space's
-        # own dir (base_uris[0]) first, then each base in the order listed. Within
-        # one base: the space's root ``steps/<name>``, then the env-co-located
-        # ancestor walk (nearest wins), then the env-class glob (fewest
-        # ``environment_configs`` keys, then path). See _resolve_step_by_base_order.
+        # Steps: only copies that serve the active env (class, ``subtypes``, and
+        # a ``steps/`` dir owned by the env or one of its ancestors, or a base's
+        # top-level ``steps/``) are candidates, and base_uris order decides
+        # between them. Within one base: the space's root ``steps/<name>``, then
+        # the deepest owning dir, fewest ``environment_configs`` keys, then path.
+        # See _resolve_step_by_base_order.
         if uri_suffix.startswith(STEPS_PREFIX):
-            step = SpaceURI._resolve_step_by_base_order(uri_suffix)
-            if step is not None:
+            chosen = SpaceURI._resolve_step_by_base_order(uri_suffix)
+            if chosen is not None:
+                # The chosen copy is final: a ``<rest>`` it lacks (or that
+                # escapes it) is unresolvable, never taken from another copy.
+                step = SpaceURI._step_uri_from_dir(*chosen)
+                if step is None:
+                    raise ValueError(f"Unresolvable space uri : {uristr}")
                 return step  # type: ignore[return-value]
         # Fallback: env-agnostic, against the space's own base_uris in order.
         # Existence is checked via the resolved URI's own scheme-aware
@@ -182,13 +187,7 @@ class SpaceURI(URI):
         makes a URI's identity deterministic *within one* ``steps/`` *root*: a
         present-but-env-excluded nested step is still selected here and its tier
         then misses, rather than being silently demoted to ``outer-step + rest``.
-        This guarantee is per root only.  Across the Tier-1 ancestor walk, which
-        probes each ancestor's own ``steps/`` root, nearest-wins still applies: if
-        a nearer ancestor ships only ``distill`` while a further one ships
-        ``distill/foo``, the nearer outer step is chosen and ``foo`` is treated as
-        its sub-asset (usually a miss, since :meth:`_step_uri_from_dir` returns
-        ``None`` when that sub-asset path does not exist).  That is the documented
-        nearest-wins rule, not a within-root demotion.
+        This guarantee is per root only.
 
         Args:
             steps_root: The ``steps/`` directory to resolve names under (e.g.
@@ -243,18 +242,17 @@ class SpaceURI(URI):
     def _enclosing_base_boundary(env_path: Path) -> Path:
         """Return the deepest base_uri directory enclosing ``env_path``.
 
-        The ancestor-walk never ascends above this boundary, so step lookups stay
-        within the base_uri subtree the env lives under.  Falls back to
-        ``env_path`` itself when no base_uri encloses it (the walk then
-        degenerates to the env's own directory).  Git base_uris are materialized
-        to their reused local clone via :meth:`_uri_to_local_path`, so a
-        git-backed env whose steps live in the same repo is bounded correctly.
+        The env dir's path relative to this boundary is what a ``steps/`` dir's
+        owner is compared with (:meth:`_env_rel_parts`).  Falls back to
+        ``env_path`` itself when no base_uri encloses it.  Git base_uris are
+        materialized to their reused local clone via :meth:`_uri_to_local_path`,
+        so a git-backed env is bounded correctly.
 
         Args:
             env_path: Absolute, resolved path of the active env's directory.
 
         Returns:
-            The boundary directory (inclusive stop point for the walk).
+            The boundary directory.
         """
         boundary = env_path
         best_len = -1
@@ -364,7 +362,7 @@ class SpaceURI(URI):
         string is uninterpretable and treated as no restriction.
 
         When ``env_class`` is unknown there is no class context to filter on, so
-        the step is admitted (preserves directory-only ancestor-walk behavior).
+        the step is admitted.
 
         Args:
             data: Parsed ``step.yaml`` mapping.
@@ -400,15 +398,12 @@ class SpaceURI(URI):
 
         * ``env_class`` unknown → ``True`` (no class context to filter on, as in
           :meth:`_subtype_ok`).
-        * a **non-empty** ``environment_configs`` block whose keys do **not**
-          include the active class → ``False``: the step is scoped to other env
-          classes and cannot run here, so it is not a match.  This is the
-          class-presence requirement the sub-type-only predicate deliberately left
-          to callers.
-        * otherwise (the class **key** is present, **or** the step declares no
-          ``environment_configs`` at all) → delegate to :meth:`_subtype_ok`.  A
-          step with no ``environment_configs`` stays env-agnostic/universal,
-          preserving the directory-placed ancestor-walk behavior.
+        * ``environment_configs`` whose keys do **not** include the active class
+          → ``False``, including a step that declares no ``environment_configs``
+          at all: it has no launcher for this env (the build would fail with "No
+          usable environment configs"), so it is not a match.
+        * otherwise (the class **key** is present) → delegate to
+          :meth:`_subtype_ok`.
 
         Presence is decided by the class **key**, not its value: a present-but-null
         entry (``environment_configs: {Skypilot:}``) declares the class and so is
@@ -423,13 +418,8 @@ class SpaceURI(URI):
         """
         if not env_class:
             return True
-        configs = data.get("environment_configs")
-        if (
-            isinstance(configs, dict)
-            and configs
-            and not SpaceURI._env_class_present(data, env_class)
-        ):
-            # Declared for other env classes only → not a match for this env.
+        if not SpaceURI._env_class_present(data, env_class):
+            # Declared for other env classes only, or for none → can't run here.
             return False
         return SpaceURI._subtype_ok(data, env_class, env_subtype)
 
@@ -439,12 +429,11 @@ class SpaceURI(URI):
     ) -> bool:
         """Parse ``step_yaml`` and apply :meth:`_env_ok`.
 
-        Applies the class-presence + sub-type gate: a step declaring an
-        ``environment_configs`` block must list the active env class (and satisfy
-        its sub-type restriction) to be admitted; a step with no
-        ``environment_configs`` is env-agnostic and admitted.  A file that can't
-        be read/parsed carries no restriction we can evaluate, so it is admitted
-        (directory-only match, as before env/sub-type filtering).
+        Applies the class-presence + sub-type gate: a step's
+        ``environment_configs`` must list the active env class (and satisfy its
+        sub-type restriction) for it to be admitted.  A file that can't be
+        read/parsed (or is absent, e.g. a bare dir under ``steps/``) carries no
+        restriction we can evaluate, so it is admitted (directory-only match).
 
         Args:
             step_yaml: Path to the candidate ``step.yaml``.
@@ -462,19 +451,17 @@ class SpaceURI(URI):
 
     @staticmethod
     def _fallback_steps_ok(base_uri: str, after: str) -> bool:
-        """Vet a Tier 3 ``steps/<after>`` fallback hit against ``base_uri``.
+        """Vet an env-agnostic fallback ``steps/<after>`` hit against ``base_uri``.
 
         The caller has already confirmed the target exists via the resolved
         URI's scheme-aware ``exists()``.  This applies the two guards that need
         the base materialized as a local directory:
 
         * **containment** — a ``<rest>`` that escapes ``<base>/steps/<name>``
-          (e.g. ``../../secret``) is rejected, matching Tiers 1 & 2;
+          (e.g. ``../../secret``) is rejected, matching the ordered search;
         * **env** — the step's own ``step.yaml`` is read and its
-          ``environment_configs`` must admit the active env: a step that
-          declares that block must list the active env class (and satisfy its
-          ``subtypes`` restriction, if any); a step with no
-          ``environment_configs`` is env-agnostic and admitted.
+          ``environment_configs`` must list the active env class (and satisfy
+          its ``subtypes`` restriction, if any) when a class is active.
 
         The step name (and thus its ``step.yaml``) is the longest prefix of
         ``after`` whose dir under ``<base>/steps`` holds a ``step.yaml``
@@ -525,16 +512,16 @@ class SpaceURI(URI):
     @staticmethod
     def _space_root_step(
         after: str, env_class: Optional[str], env_subtype: Optional[str]
-    ) -> Optional[URI]:
+    ) -> Optional[Tuple[Path, str]]:
         """Resolve ``steps/<after>`` against the space's own root (``base_uris[0]``).
 
         The space directory (the first base_uri — the space's own ``uristr``) is
         the most authoritative step source: a step it ships at
-        ``<space>/steps/<name>`` overrides an env-co-located step or one inherited
-        via ``base_uris[1:]`` (e.g. a published assets tree).  This lets a step
+        ``<space>/steps/<name>`` overrides any copy inherited via
+        ``base_uris[1:]`` (e.g. a published assets tree).  This lets a step
         being developed in its own space be exercised (by ``make test``) before it
-        is published into an inherited tree.  The same env gate as the
-        ancestor-walk is applied (:meth:`_step_env_ok`), so a space step that
+        is published into an inherited tree.  The env gate is applied
+        (:meth:`_step_env_ok`), so a space step that
         declares ``environment_configs`` without the active env class — or whose
         ``subtypes`` exclude the active env — is skipped and resolution falls
         through (it must never override a valid step with one that cannot run
@@ -551,7 +538,7 @@ class SpaceURI(URI):
             env_subtype: Active env sub-type (for the sub-type gate), or ``None``.
 
         Returns:
-            The resolved step ``URI`` when the space ships an admitting
+            ``(step_dir, rest)`` when the space ships an admitting
             ``steps/<name>``, else ``None``.
         """
         base_uris = getattr(SpaceURI._thread_local, "base_uris", None)
@@ -563,13 +550,13 @@ class SpaceURI(URI):
         found = SpaceURI._longest_step_in_root(space_root.resolve() / "steps", after)
         if found is None:
             return None
-        step_dir, rest = found
+        step_dir, _ = found
         if not SpaceURI._step_env_ok(step_dir / STEP_FILE_NAME, env_class, env_subtype):
             return None
-        return SpaceURI._step_uri_from_dir(step_dir, rest)
+        return found
 
     @staticmethod
-    def _resolve_step_by_base_order(uri_suffix: str) -> Optional[URI]:
+    def _resolve_step_by_base_order(uri_suffix: str) -> Optional[Tuple[Path, str]]:
         """Resolve ``space://steps/<after>`` with base_uris order as the priority.
 
         Only a step whose ``environment_configs`` admit the active env (its class
@@ -582,15 +569,15 @@ class SpaceURI(URI):
         The env-class glob's step name is pinned once, across all bases
         (:meth:`_longest_step_in_bases`), before the env gate, so an env-excluded
         nested step (``distill/foo``) is never demoted to ``distill`` + sub-asset
-        ``foo``.  The ancestor walk runs in the base that encloses the env dir
-        (:meth:`_env_walk_base_index`).
+        ``foo``.
 
         Args:
             uri_suffix: The scheme-stripped ``steps/<name>[/<rest>]`` suffix.
 
         Returns:
-            The matched step ``URI`` (with any ``<rest>`` appended), or ``None``
-            when no base holds a candidate (the caller then falls back).
+            ``(step_dir, rest)`` for the chosen copy (the caller resolves
+            ``rest`` within it), or ``None`` when no base holds a candidate (the
+            caller then falls back).
         """
         after = SpaceURI._steps_suffix(uri_suffix)
         if after is None:
@@ -598,21 +585,11 @@ class SpaceURI(URI):
         tl = SpaceURI._thread_local
         env_class: Optional[str] = getattr(tl, "current_env_class_name", None)
         env_subtype: Optional[str] = getattr(tl, "current_env_subtype", None)
-        env_path = SpaceURI._active_env_path()
-        walk_index = (
-            SpaceURI._env_walk_base_index(env_path) if env_path is not None else None
-        )
+        env_active = SpaceURI._active_env_path() is not None
         pinned = SpaceURI._longest_step_in_bases(after) if env_class else None
         for index, base_uri in enumerate(tl.base_uris):
             hit = SpaceURI._best_step_in_base(
-                index,
-                base_uri,
-                after,
-                pinned,
-                env_path,
-                walk_index,
-                env_class,
-                env_subtype,
+                index, base_uri, after, pinned, env_active, env_class, env_subtype
             )
             if hit is not None:
                 return hit
@@ -624,19 +601,18 @@ class SpaceURI(URI):
         base_uri: str,
         after: str,
         pinned: Optional[Tuple[str, str]],
-        env_path: Optional[Path],
-        walk_index: Optional[int],
+        env_active: bool,
         env_class: Optional[str],
         env_subtype: Optional[str],
-    ) -> Optional[URI]:
-        """Pick the step one base contributes, or None when it has no candidate.
+    ) -> Optional[Tuple[Path, str]]:
+        """Pick the step copy one base contributes, or None when it has none.
 
-        Within one base, in order: the space's root ``steps/<name>`` (only for
-        the space's own dir, ``index`` 0; :meth:`_space_root_step`) and the
-        ancestor walk from the env dir (only for the base enclosing it;
-        :meth:`_walk_colocated_steps`), both only when an env dir is active;
-        then the env-class glob over the base (:meth:`_env_class_matches`), most
-        env-specific first.
+        For the space's own dir (``index`` 0, with an env dir active), its root
+        ``steps/<name>`` comes first (:meth:`_space_root_step`).  Otherwise the
+        env-class glob over the base (:meth:`_env_class_matches`) supplies the
+        copies that serve the env, ranked: the deepest owning dir first (an env's
+        own ``steps/`` over its family's, over the base's top-level ``steps/``),
+        then fewest ``environment_configs`` keys, then path.
 
         Args:
             index: The base's position in base_uris.
@@ -644,36 +620,24 @@ class SpaceURI(URI):
             after: The URI suffix with the leading ``steps/`` stripped.
             pinned: ``(name, rest)`` from :meth:`_longest_step_in_bases`, or
                 ``None`` to skip the glob (no env class, or no such step).
-            env_path: The active env's dir, or ``None`` when none is active.
-            walk_index: The base_uris index the walk belongs to.
+            env_active: Whether an env dir is active.
             env_class: Active env class name, or ``None``.
             env_subtype: Active env sub-type, or ``None``.
 
         Returns:
-            The step ``URI``, or ``None``.
+            ``(step_dir, rest)``, or ``None``.
         """
-        if env_path is not None:
-            if index == 0:
-                hit = SpaceURI._space_root_step(after, env_class, env_subtype)
-                if hit is not None:
-                    return hit
-            if index == walk_index:
-                hit = SpaceURI._walk_colocated_steps(
-                    env_path, after, env_class, env_subtype
-                )
-                if hit is not None:
-                    return hit
+        if env_active and index == 0:
+            hit = SpaceURI._space_root_step(after, env_class, env_subtype)
+            if hit is not None:
+                return hit
         if pinned is None or env_class is None:
             return None
         name, rest = pinned
         matches = SpaceURI._env_class_matches(base_uri, name, env_class, env_subtype)
-        # Specificity first (fewer env_configs entries = more specific), then
-        # lexicographic path for a deterministic tie-break.
-        for _, _, cand in sorted(matches, key=lambda m: (m[0], m[1])):
-            hit = SpaceURI._step_uri_from_dir(cand.parent, rest)
-            if hit is not None:
-                return hit
-        return None
+        if not matches:
+            return None
+        return min(matches)[3].parent, rest
 
     @staticmethod
     def _active_env_path() -> Optional[Path]:
@@ -690,86 +654,11 @@ class SpaceURI(URI):
         return env_path.resolve() if env_path is not None else None
 
     @staticmethod
-    def _env_walk_base_index(env_path: Path) -> int:
-        """Return the index of the base the env-co-located walk belongs to.
-
-        That is the first base whose local dir is the walk's boundary
-        (:meth:`_enclosing_base_boundary`, the deepest base enclosing the env
-        dir). When no base encloses the env dir, the walk (which then checks only
-        the env dir itself) is ranked with the space's own dir, index 0.
-
-        Args:
-            env_path: The active env's resolved directory.
-
-        Returns:
-            A base_uris index.
-        """
-        boundary = SpaceURI._enclosing_base_boundary(env_path)
-        for index, base_uri in enumerate(SpaceURI._thread_local.base_uris):
-            base_path = SpaceURI._uri_to_local_path(base_uri)
-            if base_path is not None and base_path.resolve() == boundary:
-                return index
-        return 0
-
-    @staticmethod
-    def _walk_colocated_steps(
-        env_path: Path,
-        after: str,
-        env_class: Optional[str],
-        env_subtype: Optional[str],
-    ) -> Optional[URI]:
-        """Find ``steps/<after>`` by walking up from the active env dir.
-
-        Starting at ``env_path`` it checks ``<dir>/steps/<name>/step.yaml`` at
-        each ancestor, nearest-wins, stopping at (and including) the deepest
-        ``base_uri`` that encloses the env dir.  This lets sibling environments
-        under a common family directory share one step implementation while an
-        env's own dir still overrides it.  A candidate whose
-        ``environment_configs`` don't admit the active env — it declares that
-        block without the active env class, or its ``subtypes`` exclude the
-        active env — is skipped and the walk continues upward
-        (see :meth:`_step_env_ok`).
-
-        A git-backed env walks its reused clone (see :meth:`_active_env_path`),
-        so the walk works whenever the co-located steps live in the **same repo**
-        (base_uri) as the env.
-
-        Args:
-            env_path: The active env's resolved directory.
-            after: The URI suffix with the leading ``steps/`` stripped.
-            env_class: Active env class name, or ``None``.
-            env_subtype: Active env sub-type, or ``None``.
-
-        Returns:
-            The matched step ``URI`` (with any ``<rest>`` appended), or ``None``
-            when no ancestor within the boundary carries a matching step.
-        """
-        boundary = SpaceURI._enclosing_base_boundary(env_path)
-        cur = env_path
-        while True:
-            # At each ancestor the step name is the longest prefix of ``after``
-            # holding a ``step.yaml`` under ``<cur>/steps`` (nested steps
-            # included); the env gate is applied afterward, and a mismatch lets
-            # the walk continue upward — nearest-admitting-wins.
-            found = SpaceURI._longest_step_in_root(cur / "steps", after)
-            if found is not None:
-                step_dir, rest = found
-                if SpaceURI._step_env_ok(
-                    step_dir / STEP_FILE_NAME, env_class, env_subtype
-                ):
-                    hit = SpaceURI._step_uri_from_dir(step_dir, rest)
-                    if hit is not None:
-                        return hit
-            if cur in (boundary, cur.parent):
-                return None
-            cur = cur.parent
-
-    @staticmethod
     def _longest_step_in_bases(after: str) -> Optional[Tuple[str, str]]:
         """Pin the step name by ``step.yaml`` existence across all base_uris.
 
-        The Tier-2 analogue of :meth:`_longest_step_in_root`: Tier 2 has no
-        single fixed ``steps/`` root (it recursively globs each base_uri), so
+        The env-class glob's analogue of :meth:`_longest_step_in_root`: the glob
+        has no single fixed ``steps/`` root (it recursively globs each base_uri), so
         this walks the ``(name, rest)`` candidates of ``after`` longest→shortest
         and returns the first whose ``steps/.../<name>/step.yaml`` exists under
         *some* base_uri.  The glob is **anchored to the enclosing ``steps/``** — a
@@ -790,7 +679,7 @@ class SpaceURI(URI):
         env/class gate is applied by the caller to the fixed name only.  Keeping
         name selection orthogonal to the env gate is what stops a
         present-but-env-excluded nested step from being demoted to
-        ``outer-step + rest`` — Tier 2 now matches Tiers 1 and 3 on this.
+        ``outer-step + rest`` — matching the space-root and fallback lookups.
 
         Args:
             after: The URI suffix with the leading ``steps/`` stripped.
@@ -823,6 +712,73 @@ class SpaceURI(URI):
         return None
 
     @staticmethod
+    def _env_rel_parts() -> Optional[Tuple[str, ...]]:
+        """Return the active env dir's path relative to the base enclosing it.
+
+        E.g. ``("environments", "skypilot", "slurm", "bluevela")`` for an env
+        loaded from ``<gb-test>/environments/skypilot/slurm/bluevela``, used by
+        :meth:`_steps_dir_admits_env` to compare a ``steps/`` dir's owner with the
+        env by path inside each repo, whichever repo each lives in.
+
+        Returns:
+            The relative path's parts, ``()`` when no base encloses the env dir,
+            or ``None`` when no env dir is active.
+        """
+        env_path = SpaceURI._active_env_path()
+        if env_path is None:
+            return None
+        boundary = SpaceURI._enclosing_base_boundary(env_path)
+        return env_path.relative_to(boundary).parts
+
+    @staticmethod
+    def _steps_dir_admits_env(
+        base_path: Path, step_yaml: Path, env_rel: Optional[Tuple[str, ...]]
+    ) -> bool:
+        """Return whether the ``steps/`` dir holding ``step_yaml`` serves the env.
+
+        The dir that holds a ``steps/`` folder is its owner.  A base's top-level
+        ``steps/`` (owner ``()``: the builtins, a generated step space, a shared
+        step repo) serves any env.  A deeper one belongs to its owner dir: e.g.
+        ``environments/skypilot/aws/steps/`` serves only envs at or below
+        ``environments/skypilot/aws``, and ``environments/skypilot/steps/`` every
+        skypilot env.  Paths are compared relative to each one's base, so a
+        family's shared steps in one repo still serve that family's env from
+        another repo, while a sibling env's copy never serves the active env.
+
+        Args:
+            base_path: The base's local directory.
+            step_yaml: A ``step.yaml`` found under ``base_path/steps/...``.
+            env_rel: :meth:`_env_rel_parts`; ``None`` (no env dir active, e.g.
+                class-only validation) admits every owner, as before.
+
+        Returns:
+            True when the owner is ``()`` or a prefix of ``env_rel``.
+        """
+        owner = SpaceURI._steps_owner(base_path, step_yaml)
+        if not owner or env_rel is None:
+            return True
+        return env_rel[: len(owner)] == owner
+
+    @staticmethod
+    def _steps_owner(base_path: Path, step_yaml: Path) -> Tuple[str, ...]:
+        """Return the dir that owns the ``steps/`` folder holding ``step_yaml``.
+
+        That is the path from ``base_path`` to the first ``steps`` segment, e.g.
+        ``("environments", "skypilot", "aws")``, or ``()`` for the base's
+        top-level ``steps/``.  The first ``steps`` is the owner: the glob anchors
+        there, and a later one would be inside the step's own name or files.
+
+        Args:
+            base_path: The base's local directory.
+            step_yaml: A ``step.yaml`` found under ``base_path/.../steps/...``.
+
+        Returns:
+            The owner's path parts relative to ``base_path``.
+        """
+        parts = step_yaml.relative_to(base_path).parts
+        return parts[: parts.index(STEPS_PREFIX.rstrip("/"))]
+
+    @staticmethod
     def _env_class_matches(
         base_uri: str, name: str, env_class: str, env_subtype: Optional[str]
     ) -> List:
@@ -853,16 +809,20 @@ class SpaceURI(URI):
             env_subtype: Active env sub-type, or ``None``.
 
         Returns:
-            ``(specificity, path-str, path)`` tuples — specificity is the
-            env_configs key count (fewer = more env-specific) for the caller's
-            ranking; possibly empty.
+            ``(-owner_depth, specificity, path-str, path)`` tuples, so the
+            smallest ranks first: owner depth is how many dirs deep the owning
+            ``steps/`` sits (deeper = closer to the env), specificity the
+            env_configs key count (fewer = more env-specific); possibly empty.
         """
         matches: List = []
         base_path = SpaceURI._uri_to_local_path(base_uri)
         if base_path is None or not base_path.exists():
             return matches
+        env_rel = SpaceURI._env_rel_parts()
         for cand in base_path.rglob(f"{STEPS_PREFIX}**/{name}/{STEP_FILE_NAME}"):
-            if not cand.is_file():
+            if not cand.is_file() or not SpaceURI._steps_dir_admits_env(
+                base_path, cand, env_rel
+            ):
                 continue
             try:
                 with open(cand, "r", encoding="utf-8") as f:
@@ -875,7 +835,8 @@ class SpaceURI(URI):
             if SpaceURI._env_class_present(data, env_class) and SpaceURI._subtype_ok(
                 data, env_class, env_subtype
             ):
-                matches.append((len(env_keys), str(cand), cand))
+                depth = SpaceURI._steps_owner(base_path, cand)
+                matches.append((-len(depth), len(env_keys), str(cand), cand))
         return matches
 
     @staticmethod
@@ -911,9 +872,8 @@ class SpaceURI(URI):
           env dir URI carries one), so this returns the repo root for a bare
           repo base and ``<clone>/<subdir>`` for a sub-path.
 
-        This lets the ancestor-walk (Tier 1), env-class-match glob (Tier 2) and
-        the fallback guards (Tier 3) operate on local files for git-backed
-        spaces.  Non-local, non-git URIs (or a git URI whose clone fails) return
+        This lets the space-root lookup, the env-class-match glob and the
+        fallback guards operate on local files for git-backed spaces.  Non-local, non-git URIs (or a git URI whose clone fails) return
         ``None`` — callers treat that as "can't inspect" and skip/admit.
 
         Args:
@@ -999,7 +959,7 @@ class SpaceURI(URI):
         validator in :class:`gbserver.build.build.Build`, which knows each
         target's ``environment_uri`` (and can read its ``environment.yaml``) but
         doesn't instantiate the env.  Passing ``env_dir_uri`` and ``env_subtype``
-        lets the ancestor-walk (Tier 1) and the sub-type filter run during
+        lets the env-dir ownership check and the sub-type filter run during
         validation, not just the bare env-class-match.
 
         Saves and restores any previous values so nested or sibling validation
@@ -1007,7 +967,7 @@ class SpaceURI(URI):
 
         Args:
             env_class_name: The env's class name (e.g. ``"K8s"``, ``"Skypilot"``).
-            env_dir_uri: The env's directory URI for the Tier 1 ancestor-walk.
+            env_dir_uri: The env's directory URI, for the env-dir ownership check.
             env_subtype: The env's sub-type for the sub-type filter.
         """
         with cls._scope_thread_local(
@@ -1030,16 +990,12 @@ class SpaceURI(URI):
         * ``current_env_class_name``  ← ``environment.__class__.__name__``
         * ``current_env_subtype``     ← ``environment.config.subtype``
 
-        Step lookups consult, in order:
-
-        1. ``<env-dir>`` up to the enclosing base_uri — env-co-located steps,
-           nearest-wins (a step in the env's own dir overrides an ancestor's);
-           a candidate whose ``subtypes`` restriction excludes the active env is
-           skipped and the walk continues upward.
-        2.  Recursive glob ``<base>/**/<name>/step.yaml`` — first candidate whose
-            ``environment_configs`` keys contain the active env's class name and
-            whose ``subtypes`` restriction admits the active env's sub-type.
-        3.  ``<base>/steps/<name>/`` — env-agnostic fallback.
+        Step lookups take, from the earliest base_uri holding one, a copy that
+        serves this env: its ``environment_configs`` list the env's class (and
+        ``subtypes`` admit its sub-type), and its ``steps/`` dir is the base's
+        top-level one or is owned by ``<env-dir>`` or an ancestor of it, the
+        deepest owner first.  Failing that, ``<base>/steps/<name>/`` is the
+        env-agnostic fallback.
 
         Prior values are saved on enter and restored on exit so nested or
         sibling target processing in the same thread doesn't leak.

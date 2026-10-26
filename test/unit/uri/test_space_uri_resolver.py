@@ -212,6 +212,79 @@ class TestBaseOrder:
 
         assert _resolved_dir(resolved).samefile(near)
 
+    def test_sibling_env_copy_in_earlier_base_is_not_a_candidate(self, tmp_path):
+        """A copy in another env's ``steps/`` dir doesn't serve the active env,
+        even from an earlier base: the BlueVela env gets its own copy, not the
+        aws env's copy from a base listed first."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        gbtest = tmp_path / "gb-test"
+        aws = gbtest / "environments" / "skypilot" / "aws"
+        _write_step(aws / "steps" / "bfcl-eval", env_classes=["Skypilot"])
+        assets = tmp_path / "assets"
+        env_dir = assets / "environments" / "skypilot" / "lsf" / "ibm-bluevela"
+        own = _write_step(env_dir / "steps" / "bfcl-eval", env_classes=["Skypilot"])
+        _set_bases(space_root, gbtest, assets)
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/bfcl-eval")
+
+        assert _resolved_dir(resolved).samefile(own)
+
+    def test_family_steps_in_another_base_serve_the_env(self, tmp_path):
+        """A family's shared ``environments/skypilot/steps/`` serves a skypilot
+        env loaded from a different base: ownership is compared by path inside
+        each base, so cross-repo family steps still resolve."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        shared = tmp_path / "assets"
+        family = _write_step(
+            shared / "environments" / "skypilot" / "steps" / "digit", ["Skypilot"]
+        )
+        gbtest = tmp_path / "gb-test"
+        env_dir = gbtest / "environments" / "skypilot" / "slurm" / "bluevela"
+        env_dir.mkdir(parents=True)
+        _set_bases(space_root, gbtest, shared)
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/digit")
+
+        assert _resolved_dir(resolved).samefile(family)
+
+    def test_listed_base_overrides_a_builtin(self, tmp_path):
+        """With the builtins last (as ``Space`` orders them), a base listed in
+        space.yaml that ships the env's own copy of a builtin-named step wins."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        assets = tmp_path / "assets"
+        env_dir = assets / "environments" / "skypilot" / "slurm"
+        override = _write_step(env_dir / "steps" / "hfpull", env_classes=["Skypilot"])
+        builtins = tmp_path / "builtins"
+        _write_step(builtins / "steps" / "skypilot" / "hfpull", ["Skypilot"])
+        _set_bases(space_root, assets, builtins)
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/hfpull")
+
+        assert _resolved_dir(resolved).samefile(override)
+
+    def test_subasset_comes_only_from_the_chosen_copy(self, tmp_path):
+        """``space://steps/foo/<rest>`` resolves within the copy that
+        ``space://steps/foo`` picks; when that copy lacks ``<rest>`` it's a miss,
+        not a file taken from a different copy of the step."""
+        first = tmp_path / "first"
+        chosen = _write_step(first / "steps" / "foo", env_classes=["K8s"])
+        second = tmp_path / "second"
+        other = _write_step(second / "steps" / "foo", env_classes=["K8s"])
+        (other / "scripts").mkdir()
+        (other / "scripts" / "run.sh").write_text("echo other\n")
+        _set_bases(first, second)
+
+        with SpaceURI.with_current_env_class_name("K8s"):
+            assert _resolved_dir(_resolve("space://steps/foo")).samefile(chosen)
+            with pytest.raises(ValueError, match="Unresolvable space uri"):
+                _resolve("space://steps/foo/scripts/run.sh")
+
     def test_env_excluded_earlier_copy_is_skipped(self, tmp_path):
         """Base order applies only among copies that admit the env: an earlier
         base's copy for another env class is skipped."""
@@ -233,17 +306,16 @@ class TestBaseOrder:
 
 
 class TestTier1EnvColocated:
-    def test_env_colocated_hit_wins_over_inherited_base(self, tmp_path):
-        """A step in the active env's own dir wins over a same-named step in an
-        *inherited* base_uri (base_uris[1:]).  Only the space's own root
-        (base_uris[0]) outranks an env-co-located step (see the space-root tests
-        below); an inherited base does not."""
+    def test_env_colocated_hit_wins_within_its_base(self, tmp_path):
+        """In the base holding the env, the env's own copy wins over the base's
+        top-level catalog copy (deeper owning dir first)."""
         space_root = tmp_path / "space"  # base_uris[0], ships no steps/hello
         space_root.mkdir()
-        inherited = _write_step(tmp_path / "assets" / "steps" / "hello").parent.parent
-        env_dir = tmp_path / "envs" / "bash"
-        colocated = _write_step(env_dir / "steps" / "hello")
-        _set_bases(space_root, inherited)
+        assets = tmp_path / "assets"
+        _write_step(assets / "steps" / "hello", env_classes=["Bash"])
+        env_dir = assets / "envs" / "bash"
+        colocated = _write_step(env_dir / "steps" / "hello", env_classes=["Bash"])
+        _set_bases(space_root, assets)
 
         with SpaceURI.with_current_env(_make_env("Bash", env_dir)):
             resolved = _resolve("space://steps/hello")
@@ -255,9 +327,9 @@ class TestTier1EnvColocated:
         env-co-located step of the same name — so a step developed in its own
         space is exercised before it is published into an inherited tree."""
         space_root = tmp_path / "space"
-        space_step = _write_step(space_root / "steps" / "hello")
+        space_step = _write_step(space_root / "steps" / "hello", ["Skypilot"])
         env_dir = tmp_path / "assets" / "skypilot" / "slurm"
-        _write_step(env_dir / "steps" / "hello")  # env-co-located, must lose
+        _write_step(env_dir / "steps" / "hello", ["Skypilot"])  # must lose
         _set_bases(space_root, tmp_path / "assets")
 
         with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
@@ -276,7 +348,7 @@ class TestTier1EnvColocated:
             subtypes=["kubernetes"],  # excludes aws
         )
         env_dir = tmp_path / "assets" / "skypilot" / "aws"
-        colocated = _write_step(env_dir / "steps" / "hello")
+        colocated = _write_step(env_dir / "steps" / "hello", env_classes=["Skypilot"])
         _set_bases(space_root, tmp_path / "assets")
 
         with SpaceURI.with_current_env(_make_env("Skypilot", env_dir, subtype="aws")):
@@ -286,9 +358,11 @@ class TestTier1EnvColocated:
 
     def test_tier1_miss_falls_through_to_class_match(self, tmp_path):
         """When the env dir lacks the step, resolution falls through to the
-        env-class-match tier (proving ordering, not just tier-1)."""
+        env-class-match tier (proving ordering, not just tier-1). The match sits
+        in the base's top-level ``steps/`` (an env-agnostic catalog, like the
+        builtins' ``steps/<env-class>/<name>``), which serves any env."""
         base = tmp_path / "base"
-        class_match = _write_step(base / "k8s" / "steps" / "digit", env_classes=["K8s"])
+        class_match = _write_step(base / "steps" / "k8s" / "digit", env_classes=["K8s"])
         env_dir = tmp_path / "envs" / "k8s"  # exists, but has no steps/digit
         env_dir.mkdir(parents=True)
         _set_bases(base)
@@ -308,7 +382,7 @@ class TestTier1AncestorWalk:
     def test_parent_steps_shared_by_siblings(self, tmp_path):
         """A step at the family level is found by sibling envs below it."""
         base = tmp_path / "assets"
-        shared = _write_step(base / "skypilot" / "steps" / "digit")
+        shared = _write_step(base / "skypilot" / "steps" / "digit", ["Skypilot"])
         for leaf in ("kubernetes", "slurm"):
             env_dir = base / "skypilot" / leaf
             env_dir.mkdir(parents=True)
@@ -318,11 +392,12 @@ class TestTier1AncestorWalk:
             assert _resolved_dir(resolved).samefile(shared)
 
     def test_env_own_dir_overrides_parent(self, tmp_path):
-        """A step in the env's own dir wins over a same-named ancestor step."""
+        """A step in the env's own dir wins over a same-named ancestor step: the
+        deeper owning dir ranks first within a base."""
         base = tmp_path / "assets"
-        _write_step(base / "skypilot" / "steps" / "digit")
+        _write_step(base / "skypilot" / "steps" / "digit", env_classes=["Skypilot"])
         env_dir = base / "skypilot" / "kubernetes"
-        own = _write_step(env_dir / "steps" / "digit")
+        own = _write_step(env_dir / "steps" / "digit", env_classes=["Skypilot"])
         _set_bases(base)
 
         with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
@@ -333,8 +408,8 @@ class TestTier1AncestorWalk:
     def test_grandparent_walk_and_nearer_wins(self, tmp_path):
         """The nearest ancestor with the step wins across multiple levels."""
         base = tmp_path / "assets"
-        _write_step(base / "skypilot" / "steps" / "x")  # grandparent
-        nearer = _write_step(base / "skypilot" / "lsf" / "steps" / "x")  # parent
+        _write_step(base / "skypilot" / "steps" / "x", ["Skypilot"])  # grandparent
+        nearer = _write_step(base / "skypilot" / "lsf" / "steps" / "x", ["Skypilot"])
         env_dir = base / "skypilot" / "lsf" / "ibm-bluevela"
         env_dir.mkdir(parents=True)
         _set_bases(base)
@@ -357,25 +432,24 @@ class TestTier1AncestorWalk:
                 _resolve("space://steps/digit")
 
     def test_env_dir_not_under_any_base(self, tmp_path):
-        """When the env dir is under no base, the walk degenerates to that dir:
-        its own step resolves but a parent's step is not walked into."""
+        """Steps are found only through the bases: an env dir under no base
+        contributes none of its own (or its parents') steps."""
         base = tmp_path / "other"
         base.mkdir()
-        _write_step(tmp_path / "elsewhere" / "steps" / "parent_only")
+        _write_step(tmp_path / "elsewhere" / "steps" / "parent_only", ["Bash"])
         env_dir = tmp_path / "elsewhere" / "env"
-        own = _write_step(env_dir / "steps" / "hello")
+        _write_step(env_dir / "steps" / "hello", env_classes=["Bash"])
         _set_bases(base)
 
         with SpaceURI.with_current_env(_make_env("Bash", env_dir)):
-            resolved = _resolve("space://steps/hello")
-            assert _resolved_dir(resolved).samefile(own)
-            with pytest.raises(ValueError, match="Unresolvable space uri"):
-                _resolve("space://steps/parent_only")
+            for uri in ("space://steps/hello", "space://steps/parent_only"):
+                with pytest.raises(ValueError, match="Unresolvable space uri"):
+                    _resolve(uri)
 
     def test_subasset_rest_from_parent(self, tmp_path):
         """`space://steps/<name>/<rest>` resolves against an ancestor step dir."""
         base = tmp_path / "assets"
-        step_dir = _write_step(base / "skypilot" / "steps" / "sage")
+        step_dir = _write_step(base / "skypilot" / "steps" / "sage", ["Skypilot"])
         sub = step_dir / "Dockerfile"
         sub.write_text("FROM scratch\n")
         env_dir = base / "skypilot" / "kubernetes"
@@ -650,18 +724,19 @@ class TestEnvClassPresence:
             with pytest.raises(ValueError, match="Unresolvable space uri"):
                 _resolve("space://steps/foo")
 
-    def test_step_without_environment_configs_stays_universal(self, tmp_path):
-        """A step that declares no ``environment_configs`` at all is env-agnostic
-        and still resolves for any active class — the class gate only applies to
-        a step that *declares* the block (preserves directory-placed steps)."""
+    def test_step_without_environment_configs_is_not_a_match(self, tmp_path):
+        """A step that declares no ``environment_configs`` has no launcher for
+        any env, so with an env class active it is never selected: resolving it
+        fails up front instead of later in the build."""
         base = tmp_path / "assets"
-        universal = _write_step(base / "steps" / "foo")  # no environment_configs
+        bare = _write_step(base / "steps" / "foo")  # no environment_configs
         _set_bases(base)
 
         with SpaceURI.with_current_env_class_name("Skypilot"):
-            resolved = _resolve("space://steps/foo")
-
-        assert _resolved_dir(resolved).samefile(universal)
+            with pytest.raises(ValueError, match="Unresolvable space uri"):
+                _resolve("space://steps/foo")
+        # With no env class active (e.g. tooling) the path still resolves.
+        assert _resolved_dir(_resolve("space://steps/foo")).samefile(bare)
 
     def test_present_but_null_class_entry_resolves(self, tmp_path):
         """A step keyed for the active class with a **null** value
@@ -898,7 +973,7 @@ class TestTier3Fallback:
         """An env-agnostic step with no `subtypes` still resolves via the fallback
         for a subtyped env (the Tier 3 filter only excludes restricted steps)."""
         base = tmp_path / "base"
-        step_dir = _write_step(base / "steps" / "hello")  # no subtypes
+        step_dir = _write_step(base / "steps" / "hello", ["Skypilot"])  # no subtypes
         _set_bases(base)
 
         with SpaceURI.with_current_env_class_name("Skypilot", env_subtype="aws"):
@@ -1012,7 +1087,7 @@ class TestNestedStepIdentity:
     def test_space_root_nested_step(self, tmp_path):
         """Tier 1a: a nested step the space itself ships resolves off base_uris[0]."""
         space_root = tmp_path / "space"
-        nested = _write_step(space_root / "steps" / "distill" / "foo")
+        nested = _write_step(space_root / "steps" / "distill" / "foo", ["Skypilot"])
         env_dir = tmp_path / "assets" / "skypilot" / "slurm"
         env_dir.mkdir(parents=True)
         _set_bases(space_root, tmp_path / "assets")
@@ -1026,7 +1101,9 @@ class TestNestedStepIdentity:
         """Tier 1b: a nested step co-located with the env family resolves via the
         ancestor-walk."""
         base = tmp_path / "assets"
-        nested = _write_step(base / "skypilot" / "steps" / "distill" / "foo")
+        nested = _write_step(
+            base / "skypilot" / "steps" / "distill" / "foo", env_classes=["Skypilot"]
+        )
         env_dir = base / "skypilot" / "kubernetes"
         env_dir.mkdir(parents=True)
         _set_bases(base)

@@ -46,9 +46,9 @@ variables:                        # Optional. Template values exposed to build.y
 
 `base_uris` is the search path for `space://` URIs. When a target uses
 `environment_uri: space://environments/skypilot/kubernetes` or a step is `space://steps/hfpull`, the
-resolver walks the `base_uris` chain (plus the active environment's own directory) to find the matching
+resolver searches the `base_uris` chain to find the matching
 asset. For steps, only copies that match the active environment count, and the earliest base with
-one wins: the space's own directory, then the builtins, then `base_uris` in the order listed. The full
+one wins: the space's own directory, then `base_uris` in the order listed, then the builtins. The full
 algorithm, including how copies inside one base are ranked, is in
 [step-resolution.md](../environments/step-resolution.md).
 
