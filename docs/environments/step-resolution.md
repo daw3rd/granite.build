@@ -1,22 +1,24 @@
 # Step resolution: routing steps to environments
 
-When a target runs, every `space://steps/<name>` URI is resolved against the active environment.  Several mechanisms are available — pick whichever fits the step:
+When a target runs, every `space://steps/<name>` URI is resolved against the active environment.  The rule in one line: **only step copies that match the active environment are candidates, and `base_uris` order decides between them** — the space's own directory first, then the builtins, then the space's `base_uris` in the order listed.  The sections below describe where a step can live and how copies inside one base are ranked; [Resolution order](#resolution-order) puts it together.
 
 ## Space-root steps (highest priority)
 
-The **space's own directory** — the first entry in `base_uris`, i.e. the space's own `uristr` — is the most authoritative step source.  A step the space ships at `<space>/steps/<name>/step.yaml` **overrides** any env-co-located step (the ancestor-walk below) or any step inherited through the rest of the `base_uris` chain (e.g. a published `configurations/assets` tree).
+The **space's own directory** — the first entry in `base_uris`, i.e. the space's own `uristr` — is the most authoritative step source.  A step the space ships at `<space>/steps/<name>/step.yaml` **overrides** any copy in a later base, including one co-located with the environment (the ancestor-walk below) or inherited from a published `configurations/assets` tree.
 
 This is what lets a step be **developed and tested inside its own space before it is published** into an inherited assets tree.  A step's `space/` dir is re-rendered on every `make test`, so the co-located test exercises that freshly-rendered local copy — not the already-published copy reachable via `base_uris` — and publishing (`make publish-step`) is only needed once the test passes.
 
-The override honors the same `subtypes` restriction (below) as every other tier: a space-root step whose `subtypes` exclude the active env is skipped, and resolution falls through to the ancestor-walk and the remaining tiers.
+The override honors the same environment match (class and `subtypes`, below) as every other copy: a space-root step that doesn't match the active env is skipped, and resolution moves on to the next base.
 
 > Practically this only changes resolution when the space itself ships a `steps/<name>`.  A consuming space (e.g. `configurations/spaces/local`) that ships no steps is unaffected — its steps still resolve through the ancestor-walk / env-class-match against the inherited assets tree.
 
-> **Environments and asset stores get this priority for free.**  `space://environments/<name>` and `space://assetstores/<name>` have no env-co-located ancestor-walk — they resolve directly against the `base_uris` chain in order, and the space's own directory is `base_uris[0]`.  So a space's own `environments/<name>` / `assetstores/<name>` already overrides any inherited copy without a special case; only steps needed the explicit space-root check above, because their ancestor-walk would otherwise reach into the inherited tree first.  See [Spaces and `space.yaml`](../spaces/README.md#base_uris-and-space-resolution).
+> **Environments and asset stores follow the same order.**  `space://environments/<name>` and `space://assetstores/<name>` resolve directly against the `base_uris` chain in order, and the space's own directory is `base_uris[0]`, so a space's own copy overrides any inherited one.  See [Spaces and `space.yaml`](../spaces/README.md#base_uris-and-space-resolution).
 
 ## Co-located steps and the ancestor-walk
 
 A step impl placed inside the env's own directory is auto-discovered whenever that env is the active target's env.  No `base_uris` change is needed.  The resolver then **walks up** parent directories, checking `<dir>/steps/<name>/step.yaml` at each level, and stops at (and including) the deepest `base_uri` that encloses the env dir — it never escapes above the base_uri subtree.  The match is **nearest-wins**: the env's own dir beats a parent, which beats a grandparent.
+
+The walk ranks copies **within the base that holds the environment**: there it beats the env-class match (below), so a BlueVela env gets its own copy of a step even when a sibling env's copy sorts first.  It does not outrank a base listed earlier: a step in an earlier base wins over a co-located one.
 
 This lets sibling environments under a common family directory share one step implementation without duplicating it into each env dir:
 
@@ -49,36 +51,40 @@ environment_configs:
     ...
 ```
 
-So a single `skypilot/steps/digit` is resolved by `skypilot/kubernetes` and `skypilot/slurm` but is unresolvable for `skypilot/aws` and `skypilot/lsf/...`.  The filter is applied by **all three** tiers (ancestor-walk, env-class-match, and the env-agnostic fallback), so the restriction holds regardless of which tier finds the file: a candidate excluded by sub-type is skipped (the walk keeps ascending; class-match ignores it; the fallback rejects it).
+So a single `skypilot/steps/digit` is resolved by `skypilot/kubernetes` and `skypilot/slurm` but is unresolvable for `skypilot/aws` and `skypilot/lsf/...`.  The filter is applied wherever a copy is found (space root, ancestor-walk, env-class match, and the env-agnostic fallback), so a copy excluded by sub-type is never a candidate, whichever base it is in.
 
 ## Env-class matching against existing `environment_configs`
 
 The resolver can also pick a step variant based on the env's class name (`Bash`, `Docker`, `K8s`, `Lsf`, `Runpod`, `Skypilot`, ...) by reading each candidate `step.yaml`'s existing `environment_configs` keys.  No new field on `step.yaml` is required.
 
-The resolver scans recursively under each base_uri for any file at `<...>/<name>/step.yaml`, parses each one, and selects the candidate whose `environment_configs` contains the active env's class name.  The class-name match is **case-insensitive** (env class `K8s` matches an `environment_configs` key `k8s`).  Subdirectory naming is **conventional only** — the match is by file content, so step variants can live anywhere (the convention is `<base>/steps/<env-class-lowercase>/<name>/`):
+The resolver scans recursively under each base for any file at `<base>/steps/**/<name>/step.yaml`, parses each one, and keeps the candidates whose `environment_configs` contain the active env's class name.  The class-name match is **case-insensitive** (env class `K8s` matches an `environment_configs` key `k8s`).  Subdirectory naming is **conventional only** — the match is by file content, so step variants can live anywhere (the builtins use `steps/<env-class-lowercase>/<name>/`):
 
 ```
 src/gbserver/builtins/steps/
-├── s3push/step.yaml          # multi-env catch-all (environment_configs: K8s, Lsf, Skypilot, ...)
 ├── k8s/s3push/step.yaml      # only environment_configs.K8s
 ├── lsf/s3push/step.yaml      # only environment_configs.Lsf
 ├── skypilot/s3push/step.yaml # only environment_configs.Skypilot
 └── ...
 ```
 
-When the active env class is `K8s`, the resolver picks `steps/k8s/s3push/step.yaml`.  When `Lsf`, it picks `steps/lsf/s3push/step.yaml`.  When the env class is one not represented by a single-env split file, it falls back to the multi-env catch-all.  Among multiple matches, the candidate with FEWER `environment_configs` keys wins — i.e. the most env-specific file beats a multi-env file that happens to list the same env.  Lexicographic path is the secondary tie-break.
+When the active env class is `K8s`, the resolver picks `steps/k8s/s3push/step.yaml`; when `Lsf`, `steps/lsf/s3push/step.yaml`.  Bases are scanned in order and the first base with a match wins.  Within that base, the candidate with FEWER `environment_configs` keys wins (the most env-specific file beats a multi-env file that also lists the env), and lexicographic path is the secondary tie-break.
 
 ## Resolution order
 
 For `space://steps/<name>` and an env of class `K8s` loaded from `<env-dir>`:
 
-1. **Space-root** — `base_uris[0]/steps/<name>/step.yaml` (the space's own dir); if present and its `subtypes` restriction admits the active env, it wins outright.  This step runs at the head of the ancestor-walk, so it applies whenever an env is active; when no env is active, step 4's base_uris-order scan already checks `base_uris[0]` first, so the space still wins.
-2. Walk `<env-dir>` → parents up to the enclosing `base_uri`, first `steps/<name>/step.yaml` hit wins (nearest overrides); a candidate whose `subtypes` restriction excludes the active env is skipped and the walk continues.
-3. Recursive glob `<base>/**/<name>/step.yaml` across `base_uris` — first candidate (by specificity, then lex) whose `environment_configs` contains `K8s` (case-insensitively) **and** whose `subtypes` restriction admits the active env's sub-type.
-4. `<base>/steps/<name>/step.yaml` — env-agnostic fallback.  Existence is checked via the resolved URI's own scheme-aware `exists()`, and the resolved (git or file) URI is returned as-is; the `subtypes` restriction and `<rest>` containment are still enforced against the base's local materialization, so a candidate the active env's sub-type excludes is skipped.
+The bases are, in order: the space's own dir (`base_uris[0]`), the builtins (`src/gbserver/builtins`), then the space's `base_uris` as listed.  Only copies that match the active env — class `K8s` (case-insensitively) and the `subtypes` restriction — are candidates.  The resolver tries each base in that order and returns the first candidate it finds there:
+
+1. In the space's own dir: its root `steps/<name>/step.yaml` (when an env is active).
+2. In the base that encloses `<env-dir>`: walk `<env-dir>` → parents up to that base, nearest `steps/<name>/step.yaml` wins (when an env is active).
+3. In any base: the recursive glob `<base>/steps/**/<name>/step.yaml`, most env-specific first, then by path (when the env class is known).
+
+So a base listed earlier always outranks a later one, whatever the later copy's placement or specificity.  If no base has a candidate:
+
+4. `<base>/steps/<name>/step.yaml` — env-agnostic fallback, bases in order.  Existence is checked via the resolved URI's own scheme-aware `exists()`, and the resolved (git or file) URI is returned as-is; the environment match and `<rest>` containment are still enforced against the base's local materialization.
 5. unresolvable → `ValueError`.
 
-The `subtypes` restriction is honored by **all** step tiers, so it is never bypassed by falling through from one tier to the next.
+**Testing a step against a space that has its own copy.** To make sure a locally rendered step wins over a published copy, list the space holding it ahead of the published tree in `base_uris`.
 
 ### Git-backed spaces
 
@@ -88,7 +94,7 @@ The `subtypes` restriction is honored by **all** step tiers, so it is never bypa
 - The ancestor-walk resolves the env dir to its clone and walks within it, so co-located steps in the **same repo** (base_uri) as the environment resolve.  Steps in a *different* repo from the env live in a separate clone and are not reachable by the walk — use env-class-match or the fallback for those.
 - The space-root check resolves `base_uris[0]` to its clone as well, so a git-backed space's own `steps/<name>` still takes priority.
 
-A base that can't be materialized locally (unsupported scheme, or a clone failure) is treated as "can't inspect": Tier 1/2 skip it and Tier 3 admits by path existence only, matching pre-`subtypes` behavior.
+A base that can't be materialized locally (unsupported scheme, or a clone failure) is treated as "can't inspect": the ordered search (steps 1–3) skips it and the fallback (step 4) admits by path existence only, matching pre-`subtypes` behavior.
 
 Use the ancestor-walk (a shared `steps/` dir at the family level) for impls shared by environments under a common directory; add a `subtypes` list to restrict a shared step to specific endpoints of the same class; use env-class-match for splitting a multi-env step.yaml into per-env files (the builtins approach).
 
@@ -109,5 +115,5 @@ Auto-discovery of the active env's dir still happens on top of this — listing 
 
 - [Spaces and `space.yaml`](../spaces/README.md) — the `base_uris` chain these lookups walk.
 - [Environments overview](README.md) — `environment.yaml` / `step.yaml` reference and the per-type pages.
-- [`src/gbcommon/uri/space.py`](../../src/gbcommon/uri/space.py) — the `SpaceURI` resolver implementing the space-root check and the three-tier lookup.
+- [`src/gbcommon/uri/space.py`](../../src/gbcommon/uri/space.py) — the `SpaceURI` resolver (`_resolve_step_by_base_order` and the fallback).
 - [`src/gbserver/build/targetstep.py`](../../src/gbserver/build/targetstep.py) — scopes the active env on the resolver thread-local during step assimilation.

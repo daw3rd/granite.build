@@ -18,9 +18,10 @@
 
 These exercise the resolution *behavior* the build pipeline hinges on:
 
-* the 3-tier ordering in ``SpaceURI.__new__`` (env-co-located → env-class
-  match → env-agnostic fallback → ValueError);
-* ``_try_env_class_match`` specificity ordering and lexicographic tie-break;
+* base_uris order between env-matching copies (``TestBaseOrder``), and within
+  one base: space root → env-co-located walk → env-class match, then the
+  env-agnostic fallback → ValueError;
+* env-class-match specificity ordering and lexicographic tie-break within a base;
 * ``with_current_env`` / ``with_current_env_class_name`` thread-local
   save/restore semantics;
 * relative-base-uri resolution in ``gbserver.build.space._resolve_base_uris``
@@ -137,6 +138,93 @@ def _resolve(uri: str) -> URI:
 def _resolved_dir(uri: URI) -> Path:
     """Filesystem path the resolver landed on."""
     return Path(uri.uri.path)  # type: ignore[union-attr]
+
+
+# --------------------------------------------------------------------------- #
+# Base order — base_uris order decides between env-matching copies
+# --------------------------------------------------------------------------- #
+
+
+class TestBaseOrder:
+    """A step copy that admits the active env comes from the earliest base that
+    has one: the space's own dir first, then base_uris in the order listed.
+    Placement (co-located or not) and specificity rank copies within one base
+    only."""
+
+    def test_earlier_base_wins_over_more_specific_later_base(self, tmp_path):
+        """A later base's single-env copy no longer beats an earlier base's
+        multi-env copy: specificity ranks within a base, not across bases."""
+        first = tmp_path / "first"
+        early = _write_step(first / "steps" / "s3push", env_classes=["K8s", "Lsf"])
+        second = tmp_path / "second"
+        _write_step(second / "k8s" / "steps" / "s3push", env_classes=["K8s"])
+        _set_bases(first, second)
+
+        with SpaceURI.with_current_env_class_name("K8s"):
+            resolved = _resolve("space://steps/s3push")
+
+        assert _resolved_dir(resolved).samefile(early)
+
+    def test_bases_listed_order_not_path_order(self, tmp_path):
+        """Two equally specific copies in different bases: the base listed first
+        wins, even when its path sorts after the other's."""
+        zzz = tmp_path / "zzz"
+        listed_first = _write_step(zzz / "steps" / "dup", env_classes=["K8s"])
+        aaa = tmp_path / "aaa"
+        _write_step(aaa / "steps" / "dup", env_classes=["K8s"])
+        _set_bases(zzz, aaa)
+
+        with SpaceURI.with_current_env_class_name("K8s"):
+            resolved = _resolve("space://steps/dup")
+
+        assert _resolved_dir(resolved).samefile(listed_first)
+
+    def test_earlier_base_wins_over_env_colocated_in_later_base(self, tmp_path):
+        """An env-co-located copy ranks only within the env's own base, so a
+        base listed before that one wins — e.g. a generated step space listed
+        ahead of the assets tree whose env dir carries a published copy."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        generated = tmp_path / "generated"
+        local = _write_step(generated / "steps" / "hello", env_classes=["Skypilot"])
+        assets = tmp_path / "assets"
+        env_dir = assets / "skypilot" / "slurm"
+        _write_step(env_dir / "steps" / "hello", env_classes=["Skypilot"])
+        _set_bases(space_root, generated, assets)
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/hello")
+
+        assert _resolved_dir(resolved).samefile(local)
+
+    def test_env_colocated_wins_within_its_base(self, tmp_path):
+        """Within one base, the copy nearest the active env still wins over a
+        sibling env's copy that sorts first by path."""
+        assets = tmp_path / "assets"
+        _write_step(assets / "skypilot" / "aws" / "steps" / "bfcl", ["Skypilot"])
+        env_dir = assets / "skypilot" / "lsf"
+        near = _write_step(env_dir / "steps" / "bfcl", env_classes=["Skypilot"])
+        _set_bases(tmp_path / "space", assets)
+        (tmp_path / "space").mkdir()
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/bfcl")
+
+        assert _resolved_dir(resolved).samefile(near)
+
+    def test_env_excluded_earlier_copy_is_skipped(self, tmp_path):
+        """Base order applies only among copies that admit the env: an earlier
+        base's copy for another env class is skipped."""
+        first = tmp_path / "first"
+        _write_step(first / "steps" / "hello", env_classes=["Lsf"])
+        second = tmp_path / "second"
+        admitted = _write_step(second / "steps" / "hello", env_classes=["K8s"])
+        _set_bases(first, second)
+
+        with SpaceURI.with_current_env_class_name("K8s"):
+            resolved = _resolve("space://steps/hello")
+
+        assert _resolved_dir(resolved).samefile(admitted)
 
 
 # --------------------------------------------------------------------------- #
