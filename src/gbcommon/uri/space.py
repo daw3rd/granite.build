@@ -429,6 +429,24 @@ class SpaceURI(URI):
         return SpaceURI._subtype_ok(data, env_class, env_subtype)
 
     @staticmethod
+    def _load_step_yaml(step_yaml: Path) -> Optional[dict]:
+        """Read and parse a ``step.yaml``, or ``None`` if it can't be used.
+
+        Args:
+            step_yaml: Path to the candidate ``step.yaml``.
+
+        Returns:
+            The parsed mapping, or ``None`` when the file is absent, unreadable,
+            not valid YAML, or not a mapping.
+        """
+        try:
+            with open(step_yaml, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
     def _step_env_ok(
         step_yaml: Path, env_class: Optional[str], env_subtype: Optional[str]
     ) -> bool:
@@ -445,14 +463,8 @@ class SpaceURI(URI):
             env_class: Active env class name, or ``None``.
             env_subtype: Active env sub-type, or ``None``.
         """
-        try:
-            with open(step_yaml, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-        except (OSError, yaml.YAMLError):
-            return True
-        if not isinstance(data, dict):
-            return True
-        return SpaceURI._env_ok(data, env_class, env_subtype)
+        data = SpaceURI._load_step_yaml(step_yaml)
+        return data is None or SpaceURI._env_ok(data, env_class, env_subtype)
 
     @staticmethod
     def _fallback_steps_ok(base_uri: str, after: str) -> bool:
@@ -934,19 +946,15 @@ class SpaceURI(URI):
         for base_path, cand in SpaceURI._visible_step_yamls(
             base_uri, name, env_path, env_rel
         ):
-            try:
-                with open(cand, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
-            except (OSError, yaml.YAMLError):
-                continue
-            if not isinstance(data, dict):
+            # A candidate that can't be read is skipped here, unlike the
+            # directory lookups' admit-if-unreadable: the glob must rank by
+            # the step's own classes, which an unreadable file doesn't give.
+            data = SpaceURI._load_step_yaml(cand)
+            if data is None or not SpaceURI._env_ok(data, env_class, env_subtype):
                 continue
             env_keys = list((data.get("environment_configs") or {}).keys())
-            if SpaceURI._env_class_present(data, env_class) and SpaceURI._subtype_ok(
-                data, env_class, env_subtype
-            ):
-                depth = SpaceURI._steps_owner(base_path, cand)
-                matches.append((-len(depth), len(env_keys), str(cand), cand))
+            depth = SpaceURI._steps_owner(base_path, cand)
+            matches.append((-len(depth), len(env_keys), str(cand), cand))
         return matches
 
     @staticmethod
