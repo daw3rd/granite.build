@@ -432,19 +432,35 @@ class TestEnvFolderOwnership:
                 _resolve("space://steps/digit")
 
     def test_env_dir_not_under_any_base(self, tmp_path):
-        """Steps are found only through the bases: an env dir under no base
-        contributes none of its own (or its parents') steps."""
+        """An env dir under no base (e.g. an absolute ``file://`` env) is searched
+        as its own base: its own steps resolve, but its parents' do not."""
         base = tmp_path / "other"
         base.mkdir()
         _write_step(tmp_path / "elsewhere" / "steps" / "parent_only", ["Bash"])
         env_dir = tmp_path / "elsewhere" / "env"
-        _write_step(env_dir / "steps" / "hello", env_classes=["Bash"])
+        own = _write_step(env_dir / "steps" / "hello", env_classes=["Bash"])
         _set_bases(base)
 
         with SpaceURI.with_current_env(_make_env("Bash", env_dir)):
-            for uri in ("space://steps/hello", "space://steps/parent_only"):
-                with pytest.raises(ValueError, match="Unresolvable space uri"):
-                    _resolve(uri)
+            assert _resolved_dir(_resolve("space://steps/hello")).samefile(own)
+            with pytest.raises(ValueError, match="Unresolvable space uri"):
+                _resolve("space://steps/parent_only")
+
+    def test_outside_env_dir_outranks_listed_bases(self, tmp_path):
+        """An outside env dir ranks right after the space dir: its own copy beats
+        a listed base's copy, while the space's own copy still beats it."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        listed = tmp_path / "assets"
+        _write_step(listed / "steps" / "hello", env_classes=["Bash"])
+        env_dir = tmp_path / "elsewhere" / "env"
+        own = _write_step(env_dir / "steps" / "hello", env_classes=["Bash"])
+        _set_bases(space_root, listed)
+
+        with SpaceURI.with_current_env(_make_env("Bash", env_dir)):
+            assert _resolved_dir(_resolve("space://steps/hello")).samefile(own)
+            space_copy = _write_step(space_root / "steps" / "hello", ["Bash"])
+            assert _resolved_dir(_resolve("space://steps/hello")).samefile(space_copy)
 
     def test_subasset_rest_from_parent(self, tmp_path):
         """`space://steps/<name>/<rest>` resolves against an ancestor step dir."""

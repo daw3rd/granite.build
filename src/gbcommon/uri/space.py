@@ -600,11 +600,12 @@ class SpaceURI(URI):
                 return hit
         if not env_class:
             return None
-        pinned = SpaceURI._longest_step_in_bases(after)
+        bases = SpaceURI._step_search_bases()
+        pinned = SpaceURI._longest_step_in_bases(after, bases)
         if pinned is None:
             return None
         name, rest = pinned
-        for base_uri in tl.base_uris:
+        for base_uri in bases:
             matches = SpaceURI._env_class_matches(
                 base_uri=base_uri,
                 name=name,
@@ -615,6 +616,30 @@ class SpaceURI(URI):
             if matches:
                 return min(matches)[3].parent, rest
         return None
+
+    @staticmethod
+    def _step_search_bases() -> List[str]:
+        """Return the bases to search for steps, in priority order.
+
+        That is base_uris, plus the active env's own dir when no base encloses
+        it (an env loaded from an absolute ``file://`` path, or from a git repo
+        not listed in base_uris).  Such a dir is searched as its own base, right
+        after the space's own dir (``base_uris[0]``) and ahead of the listed
+        bases and the builtins, so its ``<env-dir>/steps/<name>`` is found and
+        overrides inherited copies.  Only the env dir itself is added, not its
+        parents.
+
+        Returns:
+            The base URIs to search.
+        """
+        tl = SpaceURI._thread_local
+        bases = list(tl.base_uris)
+        env_path = SpaceURI._active_env_path()
+        # The boundary is the env dir itself only when no base encloses it.
+        if env_path is None or SpaceURI._enclosing_base_boundary(env_path) != env_path:
+            return bases
+        bases.insert(min(1, len(bases)), env_path.as_uri())
+        return bases
 
     @staticmethod
     def _active_env_path() -> Optional[Path]:
@@ -631,7 +656,9 @@ class SpaceURI(URI):
         return env_path.resolve() if env_path is not None else None
 
     @staticmethod
-    def _longest_step_in_bases(after: str) -> Optional[Tuple[str, str]]:
+    def _longest_step_in_bases(
+        after: str, bases: List[str]
+    ) -> Optional[Tuple[str, str]]:
         """Pin the step name by ``step.yaml`` existence across all base_uris.
 
         The env-class glob's analogue of :meth:`_longest_step_in_root`: the glob
@@ -661,15 +688,16 @@ class SpaceURI(URI):
 
         Args:
             after: The URI suffix with the leading ``steps/`` stripped.
+            bases: The bases to probe (:meth:`_step_search_bases`).
 
         Returns:
             ``(name, rest)`` for the longest prefix of ``after`` that names a
-            step (``step.yaml`` present) under any base_uri, else ``None``.
+            step (``step.yaml`` present) under any base, else ``None``.
         """
         for name, rest in SpaceURI._iter_name_rest_candidates(after):
             if ".." in name.split("/"):
                 continue
-            for base_uri in SpaceURI._thread_local.base_uris:
+            for base_uri in bases:
                 base_path = SpaceURI._uri_to_local_path(base_uri)
                 if base_path is None or not base_path.exists():
                     continue
