@@ -231,6 +231,24 @@ class TestBaseOrder:
 
         assert _resolved_dir(resolved).samefile(own)
 
+    def test_unknown_env_dir_admits_only_top_level_steps(self, tmp_path):
+        """With the env class known but its dir not (the validator couldn't load
+        it, or no ``environment_asset``), no env folder can be shown to own the
+        env, so a sibling env's copy never wins: the base's catalog copy does."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        assets = tmp_path / "assets"
+        catalog = _write_step(assets / "steps" / "hello", env_classes=["Skypilot"])
+        envs = assets / "environments" / "skypilot"
+        _write_step(envs / "aws" / "steps" / "hello", env_classes=["Skypilot"])
+        _write_step(envs / "lsf" / "steps" / "hello", env_classes=["Skypilot"])
+        _set_bases(space_root, assets)
+
+        with SpaceURI.with_current_env_class_name("Skypilot"):
+            resolved = _resolve("space://steps/hello")
+
+        assert _resolved_dir(resolved).samefile(catalog)
+
     def test_family_steps_in_another_base_serve_the_env(self, tmp_path):
         """A family's shared ``environments/skypilot/steps/`` serves a skypilot
         env loaded from a different base: ownership is compared by path inside
@@ -641,7 +659,7 @@ class TestSubtypeMatching:
         restricted candidate is excluded for an unlisted sub-type."""
         base = tmp_path / "base"
         _write_step(
-            base / "skypilot" / "steps" / "digit",
+            base / "steps" / "skypilot" / "digit",
             env_classes=["Skypilot"],
             subtypes=["kubernetes", "slurm"],
         )
@@ -791,7 +809,7 @@ class TestEnvClassMatch:
         multi-env catch-all that also lists the active class."""
         base = tmp_path / "base"
         _write_step(base / "steps" / "s3push", env_classes=["K8s", "Lsf", "Skypilot"])
-        specific = _write_step(base / "k8s" / "steps" / "s3push", env_classes=["K8s"])
+        specific = _write_step(base / "steps" / "k8s" / "s3push", env_classes=["K8s"])
         _set_bases(base)
 
         with SpaceURI.with_current_env_class_name("K8s"):
@@ -814,7 +832,7 @@ class TestEnvClassMatch:
         _write_step(
             base / "steps" / "foo", env_classes=["K8s", "Skypilot"]
         )  # catch-all, 2 keys
-        specific = base / "k8s" / "steps" / "foo"  # null-valued, single-env
+        specific = base / "steps" / "k8s" / "foo"  # null-valued, single-env
         specific.mkdir(parents=True, exist_ok=True)
         (specific / "step.yaml").write_text(
             yaml.safe_dump(
@@ -837,8 +855,8 @@ class TestEnvClassMatch:
         """Among equally-specific matches, the lexicographically smaller path
         wins (deterministic tie-break)."""
         base = tmp_path / "base"
-        first = _write_step(base / "aaa" / "steps" / "dup", env_classes=["K8s"])
-        _write_step(base / "bbb" / "steps" / "dup", env_classes=["K8s"])
+        first = _write_step(base / "steps" / "aaa" / "dup", env_classes=["K8s"])
+        _write_step(base / "steps" / "bbb" / "dup", env_classes=["K8s"])
         _set_bases(base)
 
         with SpaceURI.with_current_env_class_name("K8s"):
@@ -862,7 +880,7 @@ class TestEnvClassMatch:
         class-name comparison is case-insensitive.  Placed under `k8s/steps/`
         (not the space-root `steps/`) so only the env-class match finds it."""
         base = tmp_path / "base"
-        match = _write_step(base / "k8s" / "steps" / "digit", env_classes=["k8s"])
+        match = _write_step(base / "steps" / "k8s" / "digit", env_classes=["k8s"])
         _set_bases(base)
 
         with SpaceURI.with_current_env_class_name("K8s"):
@@ -911,7 +929,7 @@ class TestEnvClassMatch:
         """`space://steps/<name>/<rest>` resolves against the matched step dir
         plus the `<rest>` suffix."""
         base = tmp_path / "base"
-        step_dir = _write_step(base / "k8s" / "steps" / "digit", env_classes=["K8s"])
+        step_dir = _write_step(base / "steps" / "k8s" / "digit", env_classes=["K8s"])
         sub = step_dir / "helm-charts"
         sub.mkdir()
         _set_bases(base)
@@ -1134,7 +1152,7 @@ class TestNestedStepIdentity:
         ``steps/``-relative path (``distill/foo``), not a bare leaf dir name."""
         base = tmp_path / "base"
         nested = _write_step(
-            base / "k8s" / "steps" / "distill" / "foo", env_classes=["K8s"]
+            base / "steps" / "k8s" / "distill" / "foo", env_classes=["K8s"]
         )
         _set_bases(base)
 
@@ -1269,7 +1287,7 @@ class TestNestedStepIdentity:
         """
         base = tmp_path / "base"
         real = _write_step(
-            base / "assets" / "steps" / "digit", env_classes=["Skypilot"]
+            base / "steps" / "assets" / "digit", env_classes=["Skypilot"]
         )
         sub = real / "helm-charts"  # plain sub-asset dir, NO step.yaml
         sub.mkdir()
@@ -1386,7 +1404,7 @@ class TestGitBaseUri:
         matching env class."""
         clone = tmp_path / "clone"
         _write_step(
-            clone / "k8s" / "steps" / "digit", env_classes=["k8s"]
+            clone / "steps" / "k8s" / "digit", env_classes=["k8s"]
         )  # class-match only, under a nested steps/
         _fake_git_clone(monkeypatch, clone)
         SpaceURI.set_baseuris([_GIT_BASE], {})
@@ -1394,7 +1412,7 @@ class TestGitBaseUri:
         with SpaceURI.with_current_env_class_name("K8s"):
             resolved = _resolve("space://steps/digit")
 
-        assert _resolved_dir(resolved).samefile(clone / "k8s" / "steps" / "digit")
+        assert _resolved_dir(resolved).samefile(clone / "steps" / "k8s" / "digit")
 
 
 # --------------------------------------------------------------------------- #

@@ -598,7 +598,7 @@ class SpaceURI(URI):
         env_class: Optional[str] = getattr(tl, "current_env_class_name", None)
         env_subtype: Optional[str] = getattr(tl, "current_env_subtype", None)
         env_rel = SpaceURI._env_rel_parts()
-        if env_rel is not None or env_class:
+        if env_rel is not None:
             hit = SpaceURI._space_root_step(after, env_class, env_subtype)
             if hit is not None:
                 return hit
