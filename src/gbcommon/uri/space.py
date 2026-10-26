@@ -606,7 +606,11 @@ class SpaceURI(URI):
         name, rest = pinned
         for base_uri in tl.base_uris:
             matches = SpaceURI._env_class_matches(
-                base_uri, name, env_class, env_subtype, env_rel
+                base_uri=base_uri,
+                name=name,
+                env_class=env_class,
+                env_subtype=env_subtype,
+                env_rel=env_rel,
             )
             if matches:
                 return min(matches)[3].parent, rest
@@ -754,6 +758,7 @@ class SpaceURI(URI):
 
     @staticmethod
     def _env_class_matches(
+        *,
         base_uri: str,
         name: str,
         env_class: str,
