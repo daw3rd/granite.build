@@ -23,7 +23,7 @@ Every `steps/` folder belongs to the folder that holds it, and that decides whic
 
 Owners are compared by path inside each base, so a family's shared `environments/skypilot/steps/` in one repo still serves `environments/skypilot/slurm/bluevela` loaded from another.  A sibling environment's copy never serves the active one, whichever base it's in.  Within one base, the **deepest** owner wins: the environment's own folder beats its family's, which beats the base's top-level `steps/`.
 
-Every step needs `environment_configs` listing the active environment's class to be a candidate, wherever it lives.  A step with no `environment_configs` has no launcher for any environment, so it's never selected and the URI is reported as unresolvable.
+Every step needs `environment_configs` listing the active environment's class to be a candidate, wherever it lives.  A step with no `environment_configs` has no launcher for any environment: the build picks the launcher from the step's own `environment_configs`, so the basestep's `k8s` and `Lsf` entries don't supply one.  Such a step is never selected and the URI is reported as unresolvable.
 
 This lets sibling environments under a common family directory share one step implementation without duplicating it into each env dir:
 

@@ -401,8 +401,12 @@ class SpaceURI(URI):
           :meth:`_subtype_ok`).
         * ``environment_configs`` whose keys do **not** include the active class
           → ``False``, including a step that declares no ``environment_configs``
-          at all: it has no launcher for this env (the build would fail with "No
-          usable environment configs"), so it is not a match.
+          at all.  The basestep (``step_default.yaml``) is merged into the
+          step's working dir at build time, but the launcher is picked from the
+          step's own ``environment_configs``
+          (``TargetStep._resolve_environment_and_launcher``), so such a step has
+          no launcher under any env class, K8s and Lsf included, and the build
+          fails with "No usable environment configs".  It is not a match.
         * otherwise (the class **key** is present) → delegate to
           :meth:`_subtype_ok`.
 
@@ -594,7 +598,7 @@ class SpaceURI(URI):
         env_class: Optional[str] = getattr(tl, "current_env_class_name", None)
         env_subtype: Optional[str] = getattr(tl, "current_env_subtype", None)
         env_rel = SpaceURI._env_rel_parts()
-        if env_rel is not None:
+        if env_rel is not None or env_class:
             hit = SpaceURI._space_root_step(after, env_class, env_subtype)
             if hit is not None:
                 return hit
@@ -754,16 +758,20 @@ class SpaceURI(URI):
         Args:
             base_path: The base's local directory.
             step_yaml: A ``step.yaml`` found under ``base_path/steps/...``.
-            env_rel: :meth:`_env_rel_parts`; ``None`` (no env dir active, e.g.
-                class-only validation) admits every owner, as before.
+            env_rel: :meth:`_env_rel_parts`; ``None`` when no env dir is known
+                (e.g. the validator couldn't load it, or the env has no
+                ``environment_asset``).  Then no env folder can be shown to own
+                the env, so only top-level ``steps/`` folders serve: a sibling
+                env's copy (``environments/skypilot/aws/steps/``) must never be
+                picked just because the env is unknown.
 
         Returns:
-            True when the owner is ``()`` or a prefix of ``env_rel``.
+            True when the owner is ``()``, or a prefix of a known ``env_rel``.
         """
         owner = SpaceURI._steps_owner(base_path, step_yaml)
-        if not owner or env_rel is None:
+        if not owner:
             return True
-        return env_rel[: len(owner)] == owner
+        return env_rel is not None and env_rel[: len(owner)] == owner
 
     @staticmethod
     def _steps_owner(base_path: Path, step_yaml: Path) -> Tuple[str, ...]:
