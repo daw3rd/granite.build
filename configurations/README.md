@@ -23,10 +23,10 @@ configurations/
 │   │   ├── docker/environment.yaml
 │   │   ├── skypilot/
 │   │   │   ├── steps/                   # shared by ALL skypilot envs below
-│   │   │   │   └── <name>/step.yaml     # (via the ancestor-walk, nearest-wins)
+│   │   │   │   └── <name>/step.yaml     # (deepest owning folder wins)
 │   │   │   ├── kubernetes/
 │   │   │   │   ├── environment.yaml     # inherits ../steps; may add its own
-│   │   │   │   └── steps/               # optional: env-co-located override
+│   │   │   │   └── steps/               # optional: env's own override
 │   │   │   │       └── <name>/step.yaml # wins over the shared ../steps copy
 │   │   │   └── slurm/environment.yaml   # inherits ../steps
 │   │   └── skypilot-managed/
@@ -65,6 +65,6 @@ configurations/
 ## See also
 
 - [docs/environments/README.md](../docs/environments/README.md) — environment.yaml and step.yaml reference.
-- [docs/environments/step-resolution.md](../docs/environments/step-resolution.md) — full step resolution rules (ancestor-walk, shared-steps pool, env-class match, env-agnostic).
-- [src/gbcommon/uri/space.py](../src/gbcommon/uri/space.py) — `SpaceURI` resolver implementing the tiered lookup.
+- [docs/environments/step-resolution.md](../docs/environments/step-resolution.md) — full step resolution rules (base order, env-folder ownership, env-class match, env-agnostic fallback).
+- [src/gbcommon/uri/space.py](../src/gbcommon/uri/space.py) — `SpaceURI` resolver implementing the lookup.
 - [src/gbserver/build/targetstep.py](../src/gbserver/build/targetstep.py) — scopes the active env on the resolver thread-local during step assimilation.

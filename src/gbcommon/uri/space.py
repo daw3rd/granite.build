@@ -96,9 +96,9 @@ class SpaceURI(URI):
     def _reject_parent_segments(uri_suffix: str, uristr: str) -> None:
         """Refuse a space URI whose path climbs with ``..``.
 
-        Every tier joins the suffix onto a base (tier 3 verbatim, via
-        append_path), so ``space://../../home/gbserver/.kube`` would leave the
-        space. Checked after percent-decoding, since ``%2E%2E`` is decoded later
+        Every lookup joins the suffix onto a base (the env-agnostic fallback
+        verbatim, via append_path), so ``space://../../home/gbserver/.kube``
+        would leave the space. Checked after percent-decoding, since ``%2E%2E`` is decoded later
         by the URI handlers (e.g. a git ``#subdirectory=`` via parse_qs).
 
         Args:
@@ -185,13 +185,13 @@ class SpaceURI(URI):
         This is a pure *existence* probe; the env gate is applied by the caller
         to the chosen step.  Keeping name selection orthogonal to the env gate
         makes a URI's identity deterministic *within one* ``steps/`` *root*: a
-        present-but-env-excluded nested step is still selected here and its tier
-        then misses, rather than being silently demoted to ``outer-step + rest``.
-        This guarantee is per root only.
+        present-but-env-excluded nested step is still selected here and the
+        lookup then misses, rather than being silently demoted to
+        ``outer-step + rest``.  This guarantee is per root only.
 
         Args:
             steps_root: The ``steps/`` directory to resolve names under (e.g.
-                ``<space>/steps`` or ``<ancestor>/steps``).
+                ``<space>/steps`` or ``<base>/steps``).
             after: The URI suffix with the leading ``steps/`` stripped.
 
         Returns:
@@ -393,8 +393,9 @@ class SpaceURI(URI):
     ) -> bool:
         """Return whether a step's ``environment_configs`` admit the active env.
 
-        This is the full directory-tier gate: a two-stage check that first
-        matches the env **class**, then (via :meth:`_subtype_ok`) the sub-type.
+        This is the full env gate used by the space-root and fallback lookups: a
+        two-stage check that first matches the env **class**, then (via
+        :meth:`_subtype_ok`) the sub-type.
 
         * ``env_class`` unknown → ``True`` (no class context to filter on, as in
           :meth:`_subtype_ok`).
@@ -642,7 +643,8 @@ class SpaceURI(URI):
         there, as builtin steps live at ``steps/<env-class>/<name>/`` (e.g.
         ``src/gbserver/builtins/steps/skypilot/command/``); anchoring straight to
         ``steps/<name>`` made every builtin ``space://steps/<name>`` unresolvable.
-        This keeps the pin consistent with Tiers 1/3's explicit ``steps/`` root.
+        This keeps the pin consistent with the space-root and fallback lookups'
+        explicit ``steps/`` root.
         Candidate names containing a ``..`` segment are skipped (``..`` is never
         part of a canonical name — it belongs to a crafted ``rest`` and is caught
         by the containment guard, and this also keeps ``..`` out of the glob).
@@ -766,17 +768,17 @@ class SpaceURI(URI):
         case-insensitively) and whose per-class ``subtypes`` restriction admits
         ``env_subtype``.  The glob is anchored to the enclosing ``steps/`` (the
         canonical-name invariant), matching the name pin in
-        :meth:`_longest_step_in_bases` and Tiers 1/3's explicit ``steps/`` root;
-        a bare ``<name>/step.yaml`` would admit a stray ``step.yaml`` outside any
-        ``steps/`` dir.  The ``**`` tolerates env-partition dirs between
-        ``steps/`` and the name — builtin steps live at
-        ``steps/<env-class>/<name>/`` and this tier is precisely what resolves
-        them (it reads their per-class ``environment_configs``).
+        :meth:`_longest_step_in_bases` and the space-root and fallback lookups'
+        explicit ``steps/`` root; a bare ``<name>/step.yaml`` would admit a stray
+        ``step.yaml`` outside any ``steps/`` dir.  The ``**`` tolerates
+        env-partition dirs between ``steps/`` and the name — builtin steps live
+        at ``steps/<env-class>/<name>/`` and this glob is what resolves them (it
+        reads their per-class ``environment_configs``).
 
         Class-presence is by key, not value: a present-but-null entry
         (``{Skypilot:}``) is still declared for the active class and is kept,
-        matching the ``_env_ok`` tier (a value-based ``is None`` check would
-        silently drop it, leaving the two tiers disagreeing on such steps).
+        matching :meth:`_env_ok` (a value-based ``is None`` check would silently
+        drop it, leaving the two gates disagreeing on such steps).
 
         Args:
             base_uri: The base to glob.
