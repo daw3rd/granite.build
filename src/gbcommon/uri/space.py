@@ -562,14 +562,21 @@ class SpaceURI(URI):
         Only a step whose ``environment_configs`` admit the active env (its class
         and ``subtypes``; see :meth:`_step_env_ok`) is a candidate.  The bases are
         tried in order — the space's own dir (``base_uris[0]``) first — and the
-        first base holding a candidate wins (:meth:`_best_step_in_base` picks
-        within it).  So a base listed earlier always outranks a later one,
-        whatever the later copy's placement or specificity.
+        first base holding a candidate wins.  So a base listed earlier always
+        outranks a later one, whatever the later copy's placement or specificity.
 
-        The env-class glob's step name is pinned once, across all bases
-        (:meth:`_longest_step_in_bases`), before the env gate, so an env-excluded
+        For the space's own dir (with an env dir active) its root
+        ``steps/<name>`` comes first (:meth:`_space_root_step`).  Otherwise the
+        env-class glob over a base (:meth:`_env_class_matches`) supplies the
+        copies that serve the env, ranked: the deepest owning dir first (an env's
+        own ``steps/`` over its family's, over the base's top-level ``steps/``),
+        then fewest ``environment_configs`` keys, then path.
+
+        The glob's step name is pinned across all bases
+        (:meth:`_longest_step_in_bases`) before the env gate, so an env-excluded
         nested step (``distill/foo``) is never demoted to ``distill`` + sub-asset
-        ``foo``.
+        ``foo``.  The pin (a search of every base) runs only once a base reaches
+        the glob, so a space-root hit costs no base search.
 
         Args:
             uri_suffix: The scheme-stripped ``steps/<name>[/<rest>]`` suffix.
@@ -585,59 +592,24 @@ class SpaceURI(URI):
         tl = SpaceURI._thread_local
         env_class: Optional[str] = getattr(tl, "current_env_class_name", None)
         env_subtype: Optional[str] = getattr(tl, "current_env_subtype", None)
-        env_active = SpaceURI._active_env_path() is not None
-        pinned = SpaceURI._longest_step_in_bases(after) if env_class else None
-        for index, base_uri in enumerate(tl.base_uris):
-            hit = SpaceURI._best_step_in_base(
-                index, base_uri, after, pinned, env_active, env_class, env_subtype
-            )
-            if hit is not None:
-                return hit
-        return None
-
-    @staticmethod
-    def _best_step_in_base(
-        index: int,
-        base_uri: str,
-        after: str,
-        pinned: Optional[Tuple[str, str]],
-        env_active: bool,
-        env_class: Optional[str],
-        env_subtype: Optional[str],
-    ) -> Optional[Tuple[Path, str]]:
-        """Pick the step copy one base contributes, or None when it has none.
-
-        For the space's own dir (``index`` 0, with an env dir active), its root
-        ``steps/<name>`` comes first (:meth:`_space_root_step`).  Otherwise the
-        env-class glob over the base (:meth:`_env_class_matches`) supplies the
-        copies that serve the env, ranked: the deepest owning dir first (an env's
-        own ``steps/`` over its family's, over the base's top-level ``steps/``),
-        then fewest ``environment_configs`` keys, then path.
-
-        Args:
-            index: The base's position in base_uris.
-            base_uri: The base to search.
-            after: The URI suffix with the leading ``steps/`` stripped.
-            pinned: ``(name, rest)`` from :meth:`_longest_step_in_bases`, or
-                ``None`` to skip the glob (no env class, or no such step).
-            env_active: Whether an env dir is active.
-            env_class: Active env class name, or ``None``.
-            env_subtype: Active env sub-type, or ``None``.
-
-        Returns:
-            ``(step_dir, rest)``, or ``None``.
-        """
-        if env_active and index == 0:
+        env_rel = SpaceURI._env_rel_parts()
+        if env_rel is not None:
             hit = SpaceURI._space_root_step(after, env_class, env_subtype)
             if hit is not None:
                 return hit
-        if pinned is None or env_class is None:
+        if not env_class:
+            return None
+        pinned = SpaceURI._longest_step_in_bases(after)
+        if pinned is None:
             return None
         name, rest = pinned
-        matches = SpaceURI._env_class_matches(base_uri, name, env_class, env_subtype)
-        if not matches:
-            return None
-        return min(matches)[3].parent, rest
+        for base_uri in tl.base_uris:
+            matches = SpaceURI._env_class_matches(
+                base_uri, name, env_class, env_subtype, env_rel
+            )
+            if matches:
+                return min(matches)[3].parent, rest
+        return None
 
     @staticmethod
     def _active_env_path() -> Optional[Path]:
@@ -780,7 +752,11 @@ class SpaceURI(URI):
 
     @staticmethod
     def _env_class_matches(
-        base_uri: str, name: str, env_class: str, env_subtype: Optional[str]
+        base_uri: str,
+        name: str,
+        env_class: str,
+        env_subtype: Optional[str],
+        env_rel: Optional[Tuple[str, ...]],
     ) -> List:
         """Collect env-class-matching ``step.yaml`` candidates for one name.
 
@@ -807,6 +783,8 @@ class SpaceURI(URI):
             name: Candidate step name (may be multi-segment, e.g. ``distill/foo``).
             env_class: Active env class name.
             env_subtype: Active env sub-type, or ``None``.
+            env_rel: The env dir's base-relative path (:meth:`_env_rel_parts`),
+                computed once per lookup by the caller.
 
         Returns:
             ``(-owner_depth, specificity, path-str, path)`` tuples, so the
@@ -818,7 +796,6 @@ class SpaceURI(URI):
         base_path = SpaceURI._uri_to_local_path(base_uri)
         if base_path is None or not base_path.exists():
             return matches
-        env_rel = SpaceURI._env_rel_parts()
         for cand in base_path.rglob(f"{STEPS_PREFIX}**/{name}/{STEP_FILE_NAME}"):
             if not cand.is_file() or not SpaceURI._steps_dir_admits_env(
                 base_path, cand, env_rel
