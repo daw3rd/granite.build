@@ -368,6 +368,10 @@ class SpaceURI(URI):
             data: Parsed ``step.yaml`` mapping.
             env_class: Active env class name (e.g. ``"Skypilot"``), or ``None``.
             env_subtype: Active env sub-type (e.g. ``"kubernetes"``), or ``None``.
+
+        Returns:
+            ``True`` when the step's sub-type restriction (if any) admits the
+            env, ``False`` when it lists sub-types that exclude it.
         """
         if not env_class:
             return True
@@ -420,6 +424,10 @@ class SpaceURI(URI):
             data: Parsed ``step.yaml`` mapping.
             env_class: Active env class name (e.g. ``"Skypilot"``), or ``None``.
             env_subtype: Active env sub-type (e.g. ``"kubernetes"``), or ``None``.
+
+        Returns:
+            ``True`` when the step can run under the active env (or no class is
+            active), ``False`` otherwise.
         """
         if not env_class:
             return True
@@ -462,6 +470,10 @@ class SpaceURI(URI):
             step_yaml: Path to the candidate ``step.yaml``.
             env_class: Active env class name, or ``None``.
             env_subtype: Active env sub-type, or ``None``.
+
+        Returns:
+            ``True`` when the file is unreadable or :meth:`_env_ok` admits it,
+            ``False`` when it declares classes that exclude the active env.
         """
         data = SpaceURI._load_step_yaml(step_yaml)
         return data is None or SpaceURI._env_ok(data, env_class, env_subtype)
@@ -674,6 +686,10 @@ class SpaceURI(URI):
         Reads ``current_env_dir_uri`` (set by :meth:`with_current_env` or
         :meth:`with_current_env_class_name`) and materializes it via
         :meth:`_uri_to_local_path`, so a git-backed env yields its reused clone.
+
+        Returns:
+            The env dir as a resolved local ``Path``, or ``None`` when no env dir
+            is active or it can't be materialized locally.
         """
         env_dir_uri = getattr(SpaceURI._thread_local, "current_env_dir_uri", None)
         if not env_dir_uri:
@@ -761,6 +777,11 @@ class SpaceURI(URI):
             name: Candidate step name (may be multi-segment).
             env_path: The active env's dir, or ``None``.
             env_rel: The env dir's path in its innermost base.
+
+        Yields:
+            ``(base_path, step_yaml)`` tuples: the base's local directory and the
+            path of one visible copy's ``step.yaml``, in sorted path order.
+            Nothing is yielded when the base can't be materialized locally.
         """
         base_path = SpaceURI._uri_to_local_path(base_uri)
         if base_path is None or not base_path.exists():
@@ -850,6 +871,11 @@ class SpaceURI(URI):
             base_path: The base's local directory.
             env_path: The active env's resolved dir, or ``None``.
             env_rel: The env dir's path in its innermost base, or ``None``.
+
+        Returns:
+            The env dir's path parts relative to ``base_path`` when this base
+            encloses it, otherwise ``env_rel`` unchanged (``None`` when no env
+            dir is known).
         """
         if env_path is None:
             return env_rel
@@ -927,6 +953,10 @@ class SpaceURI(URI):
 
         Args:
             parts: A path's parts relative to its base.
+
+        Returns:
+            The parts from the last ``environments`` segment on, or ``parts``
+            unchanged when it has none.
         """
         if "environments" not in parts:
             return parts
