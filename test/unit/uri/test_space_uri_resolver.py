@@ -31,6 +31,7 @@ Importing ``gbcommon.uri.space`` triggers ``gbcommon.uri``'s package init,
 which registers the ``space``/``file`` URI handlers used here.
 """
 
+import shutil
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -231,10 +232,10 @@ class TestBaseOrder:
 
         assert _resolved_dir(resolved).samefile(own)
 
-    def test_unknown_env_dir_admits_only_top_level_steps(self, tmp_path):
+    def test_unknown_env_dir_prefers_top_level_steps(self, tmp_path):
         """With the env class known but its dir not (the validator couldn't load
-        it, or no ``environment_asset``), no env folder can be shown to own the
-        env, so a sibling env's copy never wins: the base's catalog copy does."""
+        it, or no ``environment_asset``), the base's top-level catalog copy wins
+        over any env folder's copy."""
         space_root = tmp_path / "space"
         space_root.mkdir()
         assets = tmp_path / "assets"
@@ -288,6 +289,110 @@ class TestBaseOrder:
             resolved = _resolve("space://steps/distill/foo")
 
         assert _resolved_dir(resolved).samefile(outer / "foo")
+
+    def test_unknown_env_dir_still_finds_family_only_steps(self, tmp_path):
+        """With the env dir unknown (e.g. a validator clone failure), a step that
+        lives only in a family folder still resolves, so validation doesn't
+        reject a build that would resolve at runtime."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        assets = tmp_path / "assets"
+        family = _write_step(
+            assets / "environments" / "skypilot" / "steps" / "digit", ["Skypilot"]
+        )
+        _set_bases(space_root, assets)
+
+        with SpaceURI.with_current_env_class_name("Skypilot"):
+            resolved = _resolve("space://steps/digit")
+
+        assert _resolved_dir(resolved).samefile(family)
+
+    def test_unknown_env_dir_prefers_shared_family_over_one_env(self, tmp_path):
+        """With the env dir unknown, a shared family copy outranks one env's own
+        copy (shallowest owning folder first)."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        envs = tmp_path / "assets" / "environments" / "skypilot"
+        family = _write_step(envs / "steps" / "digit", env_classes=["Skypilot"])
+        _write_step(envs / "aws" / "steps" / "digit", env_classes=["Skypilot"])
+        _set_bases(space_root, tmp_path / "assets")
+
+        with SpaceURI.with_current_env_class_name("Skypilot"):
+            resolved = _resolve("space://steps/digit")
+
+        assert _resolved_dir(resolved).samefile(family)
+
+    def test_space_root_outer_step_yields_to_longer_name(self, tmp_path):
+        """A space that ships ``steps/distill`` doesn't shadow a later base's
+        ``steps/distill/foo``: the longer name wins, so the URI isn't demoted to
+        the space's ``distill`` plus a missing ``foo``."""
+        space_root = tmp_path / "space"
+        _write_step(space_root / "steps" / "distill", env_classes=["Skypilot"])
+        assets = tmp_path / "assets"
+        nested = _write_step(assets / "steps" / "distill" / "foo", ["Skypilot"])
+        env_dir = assets / "environments" / "skypilot" / "slurm"
+        env_dir.mkdir(parents=True)
+        _set_bases(space_root, assets)
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/distill/foo")
+
+        assert _resolved_dir(resolved).samefile(nested)
+
+    def test_space_root_outer_step_serves_its_own_subfile(self, tmp_path):
+        """The space's ``distill`` still serves ``space://steps/distill/foo``
+        when ``foo`` is its own sub-file and no longer step name exists."""
+        space_root = tmp_path / "space"
+        outer = _write_step(space_root / "steps" / "distill", ["Skypilot"])
+        (outer / "foo").write_text("sub-file\n")
+        env_dir = tmp_path / "assets" / "environments" / "skypilot" / "slurm"
+        env_dir.mkdir(parents=True)
+        _set_bases(space_root, tmp_path / "assets")
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/distill/foo")
+
+        assert _resolved_dir(resolved).samefile(outer / "foo")
+
+    def test_step_index_refreshes_after_reclone(self, tmp_path):
+        """The per-base step index notices a base re-cloned into the same path:
+        a removed step is gone and a new one is found."""
+        base = tmp_path / "assets"
+        _write_step(base / "steps" / "skypilot" / "gone", ["Skypilot"])
+        assert "gone" in SpaceURI._step_index(base)
+        shutil.rmtree(base)
+        _write_step(base / "steps" / "skypilot" / "other", ["Skypilot"])
+
+        index = SpaceURI._step_index(base)
+
+        assert "gone" not in index and "other" in index
+
+    def test_family_steps_match_across_repo_layouts(self, tmp_path):
+        """A family's steps under ``configurations/assets/environments/...`` in
+        one repo serve that family's env loaded from a repo laid out as
+        ``environments/...`` (compared from the ``environments`` segment)."""
+        space_root = tmp_path / "space"
+        space_root.mkdir()
+        repo = tmp_path / "repo"
+        family = _write_step(
+            repo
+            / "configurations"
+            / "assets"
+            / "environments"
+            / "skypilot"
+            / "steps"
+            / "digit",
+            ["Skypilot"],
+        )
+        gbtest = tmp_path / "gb-test"
+        env_dir = gbtest / "environments" / "skypilot" / "slurm" / "bluevela"
+        env_dir.mkdir(parents=True)
+        _set_bases(space_root, gbtest, repo)
+
+        with SpaceURI.with_current_env(_make_env("Skypilot", env_dir)):
+            resolved = _resolve("space://steps/digit")
+
+        assert _resolved_dir(resolved).samefile(family)
 
     def test_family_steps_in_another_base_serve_the_env(self, tmp_path):
         """A family's shared ``environments/skypilot/steps/`` serves a skypilot

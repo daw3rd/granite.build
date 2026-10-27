@@ -610,17 +610,25 @@ class SpaceURI(URI):
         env_class: Optional[str] = getattr(tl, "current_env_class_name", None)
         env_subtype: Optional[str] = getattr(tl, "current_env_subtype", None)
         env_rel = SpaceURI._env_rel_parts()
-        if env_rel is not None:
-            hit = SpaceURI._space_root_step(after, env_class, env_subtype)
-            if hit is not None:
-                return hit
-        if not env_class:
-            return None
-        bases = SpaceURI._step_search_bases()
         env_path = SpaceURI._active_env_path()
+        root_hit = (
+            SpaceURI._space_root_step(after, env_class, env_subtype)
+            if env_rel is not None
+            else None
+        )
+        # A space-root hit with no leftover path is final.  With a leftover
+        # (``distill`` + ``foo``), a longer step name elsewhere
+        # (``distill/foo``) wins, so the URI is never demoted to outer + rest.
+        if root_hit is not None and not root_hit[1]:
+            return root_hit
+        if not env_class:
+            return root_hit
+        bases = SpaceURI._step_search_bases()
         pinned = SpaceURI._longest_step_in_bases(after, bases, env_path, env_rel)
-        if pinned is None:
-            return None
+        if pinned is None or (
+            root_hit is not None and len(pinned[1]) >= len(root_hit[1])
+        ):
+            return root_hit
         name, rest = pinned
         for base_uri in bases:
             matches = SpaceURI._env_class_matches(
@@ -771,10 +779,12 @@ class SpaceURI(URI):
         each trailing run of folders below a ``steps`` segment, since ``**`` can
         skip env-partition dirs between ``steps/`` and the name (e.g.
         ``steps/skypilot/command`` is indexed as ``skypilot/command`` and
-        ``command``).  Built once per base
-        and kept for the thread's lookups (:meth:`set_baseuris` clears it), so
-        the name pin, the candidate search and every sub-file URI share one walk
-        instead of re-globbing the tree.
+        ``command``).  Built once per base and reused while the base is
+        unchanged (keyed by the base path and :meth:`_tree_stamp`; cleared by
+        :meth:`set_baseuris`), so the name pin, the candidate search and every
+        sub-file URI share one walk.  A forced git re-clone into the same path,
+        or a scoped change of base_uris, gives a new key, so a stale index is
+        never reused.
 
         Args:
             base_path: The base's local directory.
@@ -783,7 +793,7 @@ class SpaceURI(URI):
             Name → step.yaml paths, sorted for a deterministic order.
         """
         cache = SpaceURI._thread_local.__dict__.setdefault("step_index", {})
-        key = str(base_path)
+        key = (str(base_path), SpaceURI._tree_stamp(base_path))
         if key in cache:
             return cache[key]
         index: Dict[str, List[Path]] = {}
@@ -800,6 +810,28 @@ class SpaceURI(URI):
                 index.setdefault(name, []).append(found)
         cache[key] = index
         return index
+
+    @staticmethod
+    def _tree_stamp(base_path: Path) -> Tuple[float, ...]:
+        """Return a cheap change stamp for a base's step folders.
+
+        The modification times of the base dir and its top-level ``steps`` and
+        ``environments`` dirs change when the tree is re-cloned or a top-level
+        entry is added or removed, without walking the whole base.
+
+        Args:
+            base_path: The base's local directory.
+
+        Returns:
+            A tuple of mtimes (``-1`` for a path that can't be stat'ed).
+        """
+        stamps = []
+        for path in (base_path, base_path / "steps", base_path / "environments"):
+            try:
+                stamps.append(path.stat().st_mtime_ns / 1e9)
+            except OSError:
+                stamps.append(-1.0)
+        return tuple(stamps)
 
     @staticmethod
     def _env_rel_in(
@@ -865,18 +897,41 @@ class SpaceURI(URI):
             step_yaml: A ``step.yaml`` found under ``base_path/steps/...``.
             env_rel: :meth:`_env_rel_parts`; ``None`` when no env dir is known
                 (e.g. the validator couldn't load it, or the env has no
-                ``environment_asset``).  Then no env folder can be shown to own
-                the env, so only top-level ``steps/`` folders serve: a sibling
-                env's copy (``environments/skypilot/aws/steps/``) must never be
-                picked just because the env is unknown.
+                ``environment_asset``).  Then every folder is admitted, so a step
+                that lives only in a family folder still resolves; the caller
+                ranks top-level ``steps/`` copies first and env folders
+                shallowest-first, so a sibling env's own copy wins only when
+                nothing shared exists.
 
         Returns:
             True when the owner is ``()``, or a prefix of a known ``env_rel``.
         """
         owner = SpaceURI._steps_owner(base_path, step_yaml)
-        if not owner:
+        if not owner or env_rel is None:
+            # Top-level steps/ always; any folder when the env dir is unknown
+            # (ranked after top-level copies, see _env_class_matches).
             return True
-        return env_rel is not None and env_rel[: len(owner)] == owner
+        own = SpaceURI._from_environments(owner)
+        env = SpaceURI._from_environments(env_rel)
+        return env[: len(own)] == own
+
+    @staticmethod
+    def _from_environments(parts: Tuple[str, ...]) -> Tuple[str, ...]:
+        """Return ``parts`` from its last ``environments`` segment on, if any.
+
+        Repos lay environments out under different prefixes (gb-test's
+        ``environments/...``, this repo's ``configurations/assets/environments/...``),
+        so comparing from ``environments`` lets a family's ``steps/`` in one repo
+        serve that family's env from another.  Paths with no ``environments``
+        segment are returned unchanged and compared literally.
+
+        Args:
+            parts: A path's parts relative to its base.
+        """
+        if "environments" not in parts:
+            return parts
+        last = len(parts) - 1 - parts[::-1].index("environments")
+        return parts[last:]
 
     @staticmethod
     def _steps_owner(base_path: Path, step_yaml: Path) -> Tuple[str, ...]:
@@ -937,10 +992,12 @@ class SpaceURI(URI):
                 (:meth:`_env_rel_parts`), computed once per lookup by the caller.
 
         Returns:
-            ``(-owner_depth, specificity, path-str, path)`` tuples, so the
-            smallest ranks first: owner depth is how many dirs deep the owning
-            ``steps/`` sits (deeper = closer to the env), specificity the
-            env_configs key count (fewer = more env-specific); possibly empty.
+            ``(rank, specificity, path-str, path)`` tuples, so the smallest
+            ranks first.  ``rank`` is the owning ``steps/`` folder's depth,
+            negated when the env dir is known (deeper = closer to the env wins)
+            and as-is when it isn't (shared folders win over any one env's);
+            specificity is the env_configs key count (fewer = more
+            env-specific).  Possibly empty.
         """
         matches: List = []
         for base_path, cand in SpaceURI._visible_step_yamls(
@@ -953,8 +1010,11 @@ class SpaceURI(URI):
             if data is None or not SpaceURI._env_ok(data, env_class, env_subtype):
                 continue
             env_keys = list((data.get("environment_configs") or {}).keys())
-            depth = SpaceURI._steps_owner(base_path, cand)
-            matches.append((-len(depth), len(env_keys), str(cand), cand))
+            depth = len(SpaceURI._steps_owner(base_path, cand))
+            # Known env: deepest owner first (env's own over family over top).
+            # Unknown env: shallowest first (top-level, then shared families).
+            rank = depth if env_path is None else -depth
+            matches.append((rank, len(env_keys), str(cand), cand))
         return matches
 
     @staticmethod
