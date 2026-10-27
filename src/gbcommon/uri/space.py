@@ -16,6 +16,7 @@
 
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Self, Tuple
 from urllib.parse import ParseResult, unquote, urlparse
@@ -31,6 +32,31 @@ STEPS_PREFIX = "steps/"
 STEP_FILE_NAME = "step.yaml"
 
 logger = get_logger(__name__)
+
+# A step in a base's index: the folder that owns its ``steps/`` dir, and its
+# ``step.yaml``.
+_IndexedStep = Tuple[Tuple[str, ...], Path]
+
+
+@dataclass(frozen=True)
+class _StepLookup:
+    """The env context of one ``space://steps/...`` lookup, worked out once.
+
+    Attributes:
+        env_class: Active env class name, or ``None``.
+        env_subtype: Active env sub-type, or ``None``.
+        env_path: The active env's resolved local dir, or ``None`` when unknown.
+        env_rel: The env dir's path in its innermost base (``()`` when no base
+            encloses it), or ``None`` when no env dir is known.
+        bases: ``(base_uri, local_path)`` pairs to search, in priority order;
+            ``local_path`` is ``None`` for a base that can't be read locally.
+    """
+
+    env_class: Optional[str]
+    env_subtype: Optional[str]
+    env_path: Optional[Path]
+    env_rel: Optional[Tuple[str, ...]]
+    bases: Tuple[Tuple[str, Optional[Path]], ...]
 
 
 class SpaceURI(URI):
@@ -243,7 +269,7 @@ class SpaceURI(URI):
         """Return the deepest base_uri directory enclosing ``env_path``.
 
         The env dir's path relative to this boundary is what a ``steps/`` dir's
-        owner is compared with (:meth:`_env_rel_parts`).  Falls back to
+        owner is compared with (``_StepLookup.env_rel``).  Falls back to
         ``env_path`` itself when no base_uri encloses it.  Git base_uris are
         materialized to their reused local clone via :meth:`_uri_to_local_path`,
         so a git-backed env is bounded correctly.
@@ -618,14 +644,10 @@ class SpaceURI(URI):
         after = SpaceURI._steps_suffix(uri_suffix)
         if after is None:
             return None
-        tl = SpaceURI._thread_local
-        env_class: Optional[str] = getattr(tl, "current_env_class_name", None)
-        env_subtype: Optional[str] = getattr(tl, "current_env_subtype", None)
-        env_rel = SpaceURI._env_rel_parts()
-        env_path = SpaceURI._active_env_path()
+        ctx = SpaceURI._step_lookup()
         root_hit = (
-            SpaceURI._space_root_step(after, env_class, env_subtype)
-            if env_rel is not None
+            SpaceURI._space_root_step(after, ctx.env_class, ctx.env_subtype)
+            if ctx.env_rel is not None
             else None
         )
         # A space-root hit with no leftover path is final.  With a leftover
@@ -633,51 +655,62 @@ class SpaceURI(URI):
         # (``distill/foo``) wins, so the URI is never demoted to outer + rest.
         if root_hit is not None and not root_hit[1]:
             return root_hit
-        if not env_class:
+        if not ctx.env_class:
             return root_hit
-        bases = SpaceURI._step_search_bases()
-        pinned = SpaceURI._longest_step_in_bases(after, bases, env_path, env_rel)
+        pinned = SpaceURI._longest_step_in_bases(after, ctx)
         if pinned is None or (
             root_hit is not None and len(pinned[1]) >= len(root_hit[1])
         ):
             return root_hit
         name, rest = pinned
-        for base_uri in bases:
-            matches = SpaceURI._env_class_matches(
-                base_uri=base_uri,
-                name=name,
-                env_class=env_class,
-                env_subtype=env_subtype,
-                env_path=env_path,
-                env_rel=env_rel,
-            )
+        for base_path in (path for _, path in ctx.bases):
+            matches = SpaceURI._env_class_matches(base_path, name, ctx)
             if matches:
                 return min(matches)[3].parent, rest
         return None
 
     @staticmethod
-    def _step_search_bases() -> List[str]:
-        """Return the bases to search for steps, in priority order.
+    def _step_lookup() -> "_StepLookup":
+        """Work out the env context for one step lookup, once.
 
-        That is base_uris, plus the active env's own dir when no base encloses
-        it (an env loaded from an absolute ``file://`` path, or from a git repo
-        not listed in base_uris).  Such a dir is searched as its own base, right
-        after the space's own dir (``base_uris[0]``) and ahead of the listed
-        bases and the builtins, so its ``<env-dir>/steps/<name>`` is found and
-        overrides inherited copies.  Only the env dir itself is added, not its
-        parents.
+        Materializes the env dir and every base's local path a single time, so
+        the name pin and the candidate search (and each base they visit) reuse
+        them instead of recomputing them per base and per candidate name.
+
+        The bases are base_uris, plus the active env's own dir when no base
+        encloses it (an env loaded from an absolute ``file://`` path, or from a
+        git repo not listed in base_uris).  That dir is searched as its own base
+        right after the space's own dir, ahead of the listed bases and the
+        builtins, so its ``<env-dir>/steps/<name>`` is found; only the env dir
+        itself is added, not its parents.
 
         Returns:
-            The base URIs to search.
+            The lookup's :class:`_StepLookup`.
         """
         tl = SpaceURI._thread_local
-        bases = list(tl.base_uris)
         env_path = SpaceURI._active_env_path()
-        # The boundary is the env dir itself only when no base encloses it.
-        if env_path is None or SpaceURI._enclosing_base_boundary(env_path) != env_path:
-            return bases
-        bases.insert(min(1, len(bases)), env_path.as_uri())
-        return bases
+        boundary = (
+            SpaceURI._enclosing_base_boundary(env_path)
+            if env_path is not None
+            else None
+        )
+        uris = list(tl.base_uris)
+        # The boundary is the env dir itself only when no base encloses it: then
+        # search that dir as its own base, right after the space's own dir.
+        if env_path is not None and boundary == env_path:
+            uris.insert(min(1, len(uris)), env_path.as_uri())
+        bases = tuple((uri, SpaceURI._uri_to_local_path(uri)) for uri in uris)
+        return _StepLookup(
+            env_class=getattr(tl, "current_env_class_name", None),
+            env_subtype=getattr(tl, "current_env_subtype", None),
+            env_path=env_path,
+            env_rel=(
+                env_path.relative_to(boundary).parts
+                if env_path is not None and boundary is not None
+                else None
+            ),
+            bases=bases,
+        )
 
     @staticmethod
     def _active_env_path() -> Optional[Path]:
@@ -699,10 +732,7 @@ class SpaceURI(URI):
 
     @staticmethod
     def _longest_step_in_bases(
-        after: str,
-        bases: List[str],
-        env_path: Optional[Path],
-        env_rel: Optional[Tuple[str, ...]],
+        after: str, ctx: "_StepLookup"
     ) -> Optional[Tuple[str, str]]:
         """Pin the step name by ``step.yaml`` existence across all base_uris.
 
@@ -736,9 +766,7 @@ class SpaceURI(URI):
 
         Args:
             after: The URI suffix with the leading ``steps/`` stripped.
-            bases: The bases to probe (:meth:`_step_search_bases`).
-            env_path: The active env's dir, or ``None``.
-            env_rel: The env dir's path in its innermost base (:meth:`_env_rel_parts`).
+            ctx: The lookup's env context and bases (:meth:`_step_lookup`).
 
         Returns:
             ``(name, rest)`` for the longest prefix of ``after`` that names a
@@ -747,21 +775,16 @@ class SpaceURI(URI):
         for name, rest in SpaceURI._iter_name_rest_candidates(after):
             if ".." in name.split("/"):
                 continue
-            for base_uri in bases:
-                for _ in SpaceURI._visible_step_yamls(
-                    base_uri, name, env_path, env_rel
-                ):
+            for _, base_path in ctx.bases:
+                for _ in SpaceURI._visible_step_yamls(base_path, name, ctx):
                     return name, rest
         return None
 
     @staticmethod
     def _visible_step_yamls(
-        base_uri: str,
-        name: str,
-        env_path: Optional[Path],
-        env_rel: Optional[Tuple[str, ...]],
-    ) -> Iterator[Tuple[Path, Path]]:
-        """Yield ``(base_path, step_yaml)`` for each copy of ``name`` the env can see.
+        base_path: Optional[Path], name: str, ctx: "_StepLookup"
+    ) -> Iterator[_IndexedStep]:
+        """Yield ``(owner, step_yaml)`` for each copy of ``name`` the env can see.
 
         Globs ``<base>/steps/**/<name>/step.yaml``, anchored to the enclosing
         ``steps/`` — a canonical name is relative to a ``steps/`` ancestor, so an
@@ -773,26 +796,26 @@ class SpaceURI(URI):
         with the env's path measured from this base when it encloses the env.
 
         Args:
-            base_uri: The base to glob.
+            base_path: The base's local directory, or ``None`` when it can't be
+                read locally.
             name: Candidate step name (may be multi-segment).
-            env_path: The active env's dir, or ``None``.
-            env_rel: The env dir's path in its innermost base.
+            ctx: The lookup's env context (:meth:`_step_lookup`).
 
         Yields:
-            ``(base_path, step_yaml)`` tuples: the base's local directory and the
-            path of one visible copy's ``step.yaml``, in sorted path order.
-            Nothing is yielded when the base can't be materialized locally.
+            ``(owner, step_yaml)`` tuples: the folder that owns the copy's
+            ``steps/`` dir (``()`` for the base's top level) and its
+            ``step.yaml``, in sorted path order.  Nothing is yielded when the
+            base can't be read locally.
         """
-        base_path = SpaceURI._uri_to_local_path(base_uri)
         if base_path is None or not base_path.exists():
             return
-        rel = SpaceURI._env_rel_in(base_path, env_path, env_rel)
-        for cand in SpaceURI._step_index(base_path).get(name, ()):
-            if SpaceURI._steps_dir_admits_env(base_path, cand, rel):
-                yield base_path, cand
+        rel = SpaceURI._env_rel_in(base_path, ctx.env_path, ctx.env_rel)
+        for owner, cand in SpaceURI._step_index(base_path).get(name, ()):
+            if SpaceURI._steps_dir_admits_env(owner, rel):
+                yield owner, cand
 
     @staticmethod
-    def _step_index(base_path: Path) -> Dict[str, List[Path]]:
+    def _step_index(base_path: Path) -> Dict[str, List[_IndexedStep]]:
         """Return every step in a base, keyed by each name it can be asked for.
 
         Walks the base once for ``steps/**/step.yaml`` and keys each file by
@@ -811,24 +834,26 @@ class SpaceURI(URI):
             base_path: The base's local directory.
 
         Returns:
-            Name → step.yaml paths, sorted for a deterministic order.
+            Name → ``(owner, step_yaml)`` entries, sorted for a deterministic
+            order.  ``owner`` is the folder that holds the step's ``steps/`` dir
+            (``()`` for the base's top level), computed here once.
         """
         cache = SpaceURI._thread_local.__dict__.setdefault("step_index", {})
         key = (str(base_path), SpaceURI._tree_stamp(base_path))
         if key in cache:
             return cache[key]
-        index: Dict[str, List[Path]] = {}
+        index: Dict[str, List[_IndexedStep]] = {}
         steps = STEPS_PREFIX.rstrip("/")
+        # The glob anchors on a ``steps`` segment, so every hit has one; the
+        # first is the owner (a later one is inside the step's own name).
         for found in sorted(base_path.rglob(f"{STEPS_PREFIX}**/{STEP_FILE_NAME}")):
             if not found.is_file():
                 continue
             parts = found.parent.relative_to(base_path).parts
-            if steps not in parts:
-                continue
-            below = parts[parts.index(steps) + 1 :]
-            names = {"/".join(below[i:]) for i in range(len(below))}
-            for name in names:
-                index.setdefault(name, []).append(found)
+            at = parts.index(steps)
+            owner, below = parts[:at], parts[at + 1 :]
+            for name in {"/".join(below[i:]) for i in range(len(below))}:
+                index.setdefault(name, []).append((owner, found))
         cache[key] = index
         return index
 
@@ -885,27 +910,8 @@ class SpaceURI(URI):
         return env_rel
 
     @staticmethod
-    def _env_rel_parts() -> Optional[Tuple[str, ...]]:
-        """Return the active env dir's path relative to the base enclosing it.
-
-        E.g. ``("environments", "skypilot", "slurm", "bluevela")`` for an env
-        loaded from ``<gb-test>/environments/skypilot/slurm/bluevela``, used by
-        :meth:`_steps_dir_admits_env` to compare a ``steps/`` dir's owner with the
-        env by path inside each repo, whichever repo each lives in.
-
-        Returns:
-            The relative path's parts, ``()`` when no base encloses the env dir,
-            or ``None`` when no env dir is active.
-        """
-        env_path = SpaceURI._active_env_path()
-        if env_path is None:
-            return None
-        boundary = SpaceURI._enclosing_base_boundary(env_path)
-        return env_path.relative_to(boundary).parts
-
-    @staticmethod
     def _steps_dir_admits_env(
-        base_path: Path, step_yaml: Path, env_rel: Optional[Tuple[str, ...]]
+        owner: Tuple[str, ...], env_rel: Optional[Tuple[str, ...]]
     ) -> bool:
         """Return whether the ``steps/`` dir holding ``step_yaml`` serves the env.
 
@@ -919,9 +925,10 @@ class SpaceURI(URI):
         another repo, while a sibling env's copy never serves the active env.
 
         Args:
-            base_path: The base's local directory.
-            step_yaml: A ``step.yaml`` found under ``base_path/steps/...``.
-            env_rel: :meth:`_env_rel_parts`; ``None`` when no env dir is known
+            owner: The folder that owns the copy's ``steps/`` dir, relative to
+                its base (``()`` for the base's top level).
+            env_rel: The env dir's path in its base (``_StepLookup.env_rel``);
+                ``None`` when no env dir is known
                 (e.g. the validator couldn't load it, or the env has no
                 ``environment_asset``).  Then every folder is admitted, so a step
                 that lives only in a family folder still resolves; the caller
@@ -932,7 +939,6 @@ class SpaceURI(URI):
         Returns:
             True when the owner is ``()``, or a prefix of a known ``env_rel``.
         """
-        owner = SpaceURI._steps_owner(base_path, step_yaml)
         if not owner or env_rel is None:
             # Top-level steps/ always; any folder when the env dir is unknown
             # (ranked after top-level copies, see _env_class_matches).
@@ -964,33 +970,8 @@ class SpaceURI(URI):
         return parts[last:]
 
     @staticmethod
-    def _steps_owner(base_path: Path, step_yaml: Path) -> Tuple[str, ...]:
-        """Return the dir that owns the ``steps/`` folder holding ``step_yaml``.
-
-        That is the path from ``base_path`` to the first ``steps`` segment, e.g.
-        ``("environments", "skypilot", "aws")``, or ``()`` for the base's
-        top-level ``steps/``.  The first ``steps`` is the owner: the glob anchors
-        there, and a later one would be inside the step's own name or files.
-
-        Args:
-            base_path: The base's local directory.
-            step_yaml: A ``step.yaml`` found under ``base_path/.../steps/...``.
-
-        Returns:
-            The owner's path parts relative to ``base_path``.
-        """
-        parts = step_yaml.relative_to(base_path).parts
-        return parts[: parts.index(STEPS_PREFIX.rstrip("/"))]
-
-    @staticmethod
     def _env_class_matches(
-        *,
-        base_uri: str,
-        name: str,
-        env_class: str,
-        env_subtype: Optional[str],
-        env_path: Optional[Path],
-        env_rel: Optional[Tuple[str, ...]],
+        base_path: Optional[Path], name: str, ctx: "_StepLookup"
     ) -> List:
         """Collect env-class-matching ``step.yaml`` candidates for one name.
 
@@ -1013,13 +994,11 @@ class SpaceURI(URI):
         drop it, leaving the two gates disagreeing on such steps).
 
         Args:
-            base_uri: The base to glob.
+            base_path: The base's local directory, or ``None`` when it can't be
+                read locally.
             name: Candidate step name (may be multi-segment, e.g. ``distill/foo``).
-            env_class: Active env class name.
-            env_subtype: Active env sub-type, or ``None``.
-            env_path: The active env's dir, or ``None``.
-            env_rel: The env dir's path in its innermost base
-                (:meth:`_env_rel_parts`), computed once per lookup by the caller.
+            ctx: The lookup's env context (:meth:`_step_lookup`), whose
+                ``env_class`` is set.
 
         Returns:
             ``(rank, specificity, path-str, path)`` tuples, so the smallest
@@ -1030,20 +1009,19 @@ class SpaceURI(URI):
             env-specific).  Possibly empty.
         """
         matches: List = []
-        for base_path, cand in SpaceURI._visible_step_yamls(
-            base_uri, name, env_path, env_rel
-        ):
+        for owner, cand in SpaceURI._visible_step_yamls(base_path, name, ctx):
             # A candidate that can't be read is skipped here, unlike the
             # directory lookups' admit-if-unreadable: the glob must rank by
             # the step's own classes, which an unreadable file doesn't give.
             data = SpaceURI._load_step_yaml(cand)
-            if data is None or not SpaceURI._env_ok(data, env_class, env_subtype):
+            if data is None or not SpaceURI._env_ok(
+                data, ctx.env_class, ctx.env_subtype
+            ):
                 continue
             env_keys = list((data.get("environment_configs") or {}).keys())
-            depth = len(SpaceURI._steps_owner(base_path, cand))
             # Known env: deepest owner first (env's own over family over top).
             # Unknown env: shallowest first (top-level, then shared families).
-            rank = depth if env_path is None else -depth
+            rank = len(owner) if ctx.env_path is None else -len(owner)
             matches.append((rank, len(env_keys), str(cand), cand))
         return matches
 
