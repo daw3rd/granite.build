@@ -913,16 +913,19 @@ class SpaceURI(URI):
     def _steps_dir_admits_env(
         owner: Tuple[str, ...], env_rel: Optional[Tuple[str, ...]]
     ) -> bool:
-        """Return whether the ``steps/`` dir holding ``step_yaml`` serves the env.
+        """Return whether a ``steps/`` dir with this ``owner`` serves the env.
 
         The dir that holds a ``steps/`` folder is its owner.  A base's top-level
         ``steps/`` (owner ``()``: the builtins, a generated step space, a shared
         step repo) serves any env.  A deeper one belongs to its owner dir: e.g.
         ``environments/skypilot/aws/steps/`` serves only envs at or below
         ``environments/skypilot/aws``, and ``environments/skypilot/steps/`` every
-        skypilot env.  Paths are compared relative to each one's base, so a
-        family's shared steps in one repo still serve that family's env from
-        another repo, while a sibling env's copy never serves the active env.
+        skypilot env.  Both paths are compared from their last ``environments``
+        segment on (:meth:`_from_environments`), so repos with different
+        prefixes (gb-test's ``environments/...``, this repo's
+        ``configurations/assets/environments/...``) still match: a family's
+        shared steps in one repo serve that family's env from another, while a
+        sibling env's copy never serves the active env.
 
         Args:
             owner: The folder that owns the copy's ``steps/`` dir, relative to
@@ -937,7 +940,9 @@ class SpaceURI(URI):
                 nothing shared exists.
 
         Returns:
-            True when the owner is ``()``, or a prefix of a known ``env_rel``.
+            ``True`` when ``owner`` is ``()``, when ``env_rel`` is ``None``, or
+            when ``owner`` is a prefix of ``env_rel`` with both compared from
+            their last ``environments`` segment; ``False`` otherwise.
         """
         if not owner or env_rel is None:
             # Top-level steps/ always; any folder when the env dir is unknown
@@ -956,6 +961,11 @@ class SpaceURI(URI):
         so comparing from ``environments`` lets a family's ``steps/`` in one repo
         serve that family's env from another.  Paths with no ``environments``
         segment are returned unchanged and compared literally.
+
+        The prefix is ignored entirely, so any ``.../environments/<family>/steps/``
+        in a base serves that family, wherever it sits (e.g. a stray
+        ``test-data/old/environments/skypilot/steps/x`` in a space repo); see
+        docs/environments/step-resolution.md.
 
         Args:
             parts: A path's parts relative to its base.
