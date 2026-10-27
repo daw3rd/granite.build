@@ -18,7 +18,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Self, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Self, Tuple
 from urllib.parse import ParseResult, unquote, urlparse
 
 import yaml
@@ -265,25 +265,28 @@ class SpaceURI(URI):
         )
 
     @staticmethod
-    def _enclosing_base_boundary(env_path: Path) -> Path:
-        """Return the deepest base_uri directory enclosing ``env_path``.
+    def _enclosing_base_boundary(
+        env_path: Path, base_paths: Iterable[Optional[Path]]
+    ) -> Path:
+        """Return the deepest base directory enclosing ``env_path``.
 
         The env dir's path relative to this boundary is what a ``steps/`` dir's
         owner is compared with (``_StepLookup.env_rel``).  Falls back to
-        ``env_path`` itself when no base_uri encloses it.  Git base_uris are
-        materialized to their reused local clone via :meth:`_uri_to_local_path`,
-        so a git-backed env is bounded correctly.
+        ``env_path`` itself when no base encloses it.
 
         Args:
             env_path: Absolute, resolved path of the active env's directory.
+            base_paths: The bases' local paths, already materialized by the
+                caller (``None`` for a base that can't be read locally); git
+                bases are their reused local clone, so a git-backed env is
+                bounded correctly.
 
         Returns:
             The boundary directory.
         """
         boundary = env_path
         best_len = -1
-        for base_uri in SpaceURI._thread_local.base_uris:
-            base_path = SpaceURI._uri_to_local_path(base_uri)
+        for base_path in base_paths:
             if base_path is None:
                 continue
             base_path = base_path.resolve()
@@ -689,17 +692,17 @@ class SpaceURI(URI):
         """
         tl = SpaceURI._thread_local
         env_path = SpaceURI._active_env_path()
+        # Materialize each base once; the boundary scan and the search reuse it.
+        bases = [(uri, SpaceURI._uri_to_local_path(uri)) for uri in tl.base_uris]
         boundary = (
-            SpaceURI._enclosing_base_boundary(env_path)
+            SpaceURI._enclosing_base_boundary(env_path, (p for _, p in bases))
             if env_path is not None
             else None
         )
-        uris = list(tl.base_uris)
         # The boundary is the env dir itself only when no base encloses it: then
         # search that dir as its own base, right after the space's own dir.
         if env_path is not None and boundary == env_path:
-            uris.insert(min(1, len(uris)), env_path.as_uri())
-        bases = tuple((uri, SpaceURI._uri_to_local_path(uri)) for uri in uris)
+            bases.insert(min(1, len(bases)), (env_path.as_uri(), env_path))
         return _StepLookup(
             env_class=getattr(tl, "current_env_class_name", None),
             env_subtype=getattr(tl, "current_env_subtype", None),
@@ -709,7 +712,7 @@ class SpaceURI(URI):
                 if env_path is not None and boundary is not None
                 else None
             ),
-            bases=bases,
+            bases=tuple(bases),
         )
 
     @staticmethod
