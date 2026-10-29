@@ -187,6 +187,10 @@ _LOCAL_LOG_ROOT = "/tmp/sky-logs"
 # How much of a job log's end to read for the failure tail. Bounds the read for
 # multi-GB logs; comfortably above sanitize_log_tail's display cap.
 _LOG_TAIL_READ_BYTES = 64 * 1024
+# Bound on the extra log download a failure does for a step whose run never pulled
+# the log (no event parsers). Best-effort: past this the failure is reported
+# without a tail rather than waiting on SkyPilot's download retries.
+_FAILURE_LOG_DOWNLOAD_TIMEOUT_S = 60
 # For LSF clusters the grace is followed by a direct `bjobs` check, and a job LSF
 # still reports as alive -- or one LSF cannot be asked about -- is kept until this
 # ceiling. Bounded, because a cluster SkyPilot can no longer see is one this
@@ -1837,6 +1841,57 @@ def _read_saved_log_tail(
         return ""
     lines = text.rstrip("\n").split("\n")[-max_lines:]
     return sanitize_log_tail("\n".join(lines), secret_values) or ""
+
+
+def _save_local_log_copy(log_dir: str, cluster_name: str, job_id: int) -> None:
+    """Copy a downloaded SkyPilot job log dir to the runner's local log root.
+
+    The copy at ``_LOCAL_LOG_ROOT/<cluster>/job-<id>/`` is what
+    :func:`_read_saved_log_tail` reads and is handy for debugging on the runner.
+    Best-effort: files that fail to copy are skipped.
+
+    :param log_dir: the directory ``sky.download_logs`` returned.
+    :param cluster_name: the SkyPilot cluster the job ran on.
+    :param job_id: the SkyPilot job id.
+    """
+    import shutil
+
+    tmp_log_dir = f"{_LOCAL_LOG_ROOT}/{cluster_name}/job-{job_id}"
+    os.makedirs(tmp_log_dir, exist_ok=True)
+    for src_path in glob.glob(f"{log_dir}/*"):
+        try:
+            shutil.copy2(src_path, tmp_log_dir)
+        except OSError:
+            pass
+    logger.info(
+        "Saved job logs to %s (cluster %s job %s)", tmp_log_dir, cluster_name, job_id
+    )
+
+
+def _has_local_log_copy(cluster_name: str, job_id: int) -> bool:
+    """Whether a local copy of the job log already exists (downloaded or streamed).
+
+    :param cluster_name: the SkyPilot cluster the job ran on.
+    :param job_id: the SkyPilot job id.
+    :returns: True if :func:`_read_saved_log_tail` has a file to read.
+    """
+    job_dir = os.path.join(_LOCAL_LOG_ROOT, cluster_name, f"job-{job_id}")
+    return bool(glob.glob(os.path.join(job_dir, "*.log"))) or os.path.isfile(
+        f"{job_dir}.log"
+    )
+
+
+def _fetch_local_log_copy(cluster_name: str, job_id: int) -> None:
+    """Download a job's log and save the local copy, for a step whose run never
+    pulled it (no event log parsers). Blocking; run it in a thread.
+
+    :param cluster_name: the SkyPilot cluster the job ran on.
+    :param job_id: the SkyPilot job id.
+    :raises Exception: whatever ``sky.download_logs`` raises after its retries.
+    """
+    log_dir = _download_logs_with_retry(cluster_name, job_id)
+    if log_dir:
+        _save_local_log_copy(os.path.expanduser(log_dir), cluster_name, job_id)
 
 
 def _read_file_end(path: str, max_bytes: int) -> str:
@@ -4733,6 +4788,7 @@ class Skypilot(Environment):
         log_dir = self._job_log_dirs.get(launch_id)
         if log_dir:
             msg += f"\nFull job log: {log_dir}/job.log"
+        await self._ensure_local_log_copy(cluster_name, job_id)
         tail = await asyncio.to_thread(
             _read_saved_log_tail,
             cluster_name,
@@ -4742,6 +4798,38 @@ class Skypilot(Environment):
         if tail:
             msg += f"\nLast lines of the job log:\n```\n{tail}\n```"
         return msg
+
+    async def _ensure_local_log_copy(
+        self: Self, cluster_name: str, job_id: Optional[int]
+    ) -> None:
+        """Make sure a local log copy exists for the failure tail.
+
+        Steps with event log parsers already saved one (final pull or live
+        stream). Others never downloaded the log, so fetch it now, in a thread
+        and bounded by ``_FAILURE_LOG_DOWNLOAD_TIMEOUT_S``. Never raises: on a
+        timeout or error the failure is reported without a tail.
+
+        :param cluster_name: the SkyPilot cluster the job ran on.
+        :param job_id: the SkyPilot job id (``None``: nothing to fetch).
+        """
+        if job_id is None or _has_local_log_copy(cluster_name, job_id):
+            return
+        fut = asyncio.ensure_future(
+            asyncio.to_thread(_fetch_local_log_copy, cluster_name, job_id)
+        )
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(fut), timeout=_FAILURE_LOG_DOWNLOAD_TIMEOUT_S
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                "Could not fetch the log of %s job %s for the failure tail: %s",
+                cluster_name,
+                job_id,
+                e,
+            )
+            # The thread can't be interrupted; let it finish in the background.
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
 
     def _start_log_stream_task(
         self: Self,
@@ -4839,22 +4927,7 @@ class Skypilot(Environment):
                 return max_line
 
             log_dir = os.path.expanduser(log_dir)
-            # Save a copy to /tmp for easy debugging access
-            tmp_log_dir = f"{_LOCAL_LOG_ROOT}/{cluster_name}/job-{job_id}"
-            os.makedirs(tmp_log_dir, exist_ok=True)
-            for src_path in glob.glob(f"{log_dir}/*"):
-                try:
-                    import shutil
-
-                    shutil.copy2(src_path, tmp_log_dir)
-                except OSError:
-                    pass
-            logger.info(
-                "Saved job logs to %s (cluster %s job %s)",
-                tmp_log_dir,
-                cluster_name,
-                job_id,
-            )
+            _save_local_log_copy(log_dir, cluster_name, job_id)
 
             log_files = sorted(glob.glob(f"{log_dir}/*.log"))
             if not log_files:

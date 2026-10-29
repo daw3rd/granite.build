@@ -377,13 +377,13 @@ class TestReadLogTail:
         assert tail.endswith("last")
 
 
-def _failed_sky():
+def _failed_sky(job_id=7):
     sky = MagicMock()
     failed = MagicMock()
     failed.is_terminal.return_value = True
     failed.__str__ = lambda s: "JobStatus.FAILED"
     sky.job_status = MagicMock(return_value="req")
-    sky.get = MagicMock(return_value={7: failed})
+    sky.get = MagicMock(return_value={job_id: failed})
     return sky
 
 
@@ -436,6 +436,91 @@ class TestFailureCarriesLogTail:
         assert fail.payload.status == Status.FAILED
         assert "Traceback: boom" in fail.payload.data["error"]
         assert "declaredvalue123" not in fail.payload.data["error"]
+
+    @pytest.mark.asyncio
+    async def test_step_without_log_parsers_still_gets_a_tail(self, tmp_path):
+        """No event parsers means no log pull during the run, so on failure the
+        log is downloaded just for the tail."""
+        env = _make_env({"default_cloud": "slurm"})
+        env._cluster_names["np-1"] = "gb-np"
+        env._job_ids["np-1"] = 9
+        downloaded = tmp_path / "sky_logs" / "job-9"
+        downloaded.mkdir(parents=True)
+        (downloaded / "run.log").write_text("starting\nValueError: no parsers\n")
+        local_root = tmp_path / "local"
+        with (
+            patch.object(skymod, "sky", _failed_sky(job_id=9)),
+            patch.object(skymod, "HAS_SKYPILOT", True),
+            patch.object(skymod, "_LOCAL_LOG_ROOT", str(local_root)),
+            patch.object(
+                skymod, "_download_logs_with_retry", return_value=str(downloaded)
+            ) as download,
+        ):
+            with pytest.raises(WorkloadFailedException) as exc:
+                await env._poll_skypilot_job(
+                    launch_id="np-1",
+                    event_q=asyncio.Queue(),
+                    entityrun_metadata=EntityRunMetadata(build_id="b"),
+                    poll_interval=0,
+                )  # no event_configs
+        download.assert_called_once_with("gb-np", 9)
+        assert "ValueError: no parsers" in str(exc.value)
+        assert (local_root / "gb-np" / "job-9" / "run.log").exists()
+
+    @pytest.mark.asyncio
+    async def test_existing_local_copy_is_not_downloaded_again(self, tmp_path):
+        env = self._env(tmp_path)  # local copy already saved
+        with (
+            patch.object(skymod, "sky", _failed_sky()),
+            patch.object(skymod, "HAS_SKYPILOT", True),
+            patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)),
+            patch.object(skymod, "_download_logs_with_retry") as download,
+        ):
+            with pytest.raises(WorkloadFailedException):
+                await env._poll_skypilot_job(
+                    launch_id="lf-1",
+                    event_q=asyncio.Queue(),
+                    entityrun_metadata=EntityRunMetadata(build_id="b"),
+                    poll_interval=0,
+                )
+        download.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_hung_download_does_not_delay_the_failure(self, tmp_path):
+        """The tail is best-effort: a download stuck in SkyPilot's retries is
+        abandoned after the timeout and the failure is reported without it."""
+        import threading
+
+        env = _make_env({"default_cloud": "slurm"})
+        env._cluster_names["np-2"] = "gb-np"
+        env._job_ids["np-2"] = 9
+        release = threading.Event()
+        with (
+            patch.object(skymod, "sky", _failed_sky(job_id=9)),
+            patch.object(skymod, "HAS_SKYPILOT", True),
+            patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)),
+            patch.object(skymod, "_FAILURE_LOG_DOWNLOAD_TIMEOUT_S", 0.1),
+            patch.object(
+                skymod,
+                "_download_logs_with_retry",
+                side_effect=lambda *_: release.wait(10),
+            ),
+        ):
+            try:
+                with pytest.raises(WorkloadFailedException) as exc:
+                    await asyncio.wait_for(
+                        env._poll_skypilot_job(
+                            launch_id="np-2",
+                            event_q=asyncio.Queue(),
+                            entityrun_metadata=EntityRunMetadata(build_id="b"),
+                            poll_interval=0,
+                        ),
+                        timeout=5,
+                    )
+            finally:
+                release.set()  # let the abandoned worker thread finish
+        assert "terminated with status" in str(exc.value)
+        assert "Last lines" not in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_tail_is_read_off_the_event_loop(self, tmp_path):
