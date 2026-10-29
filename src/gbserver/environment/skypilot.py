@@ -71,7 +71,7 @@ from gbserver.types.errors import (
     WorkloadFailedException,
 )
 from gbserver.utils.logger import get_logger
-from gbserver.utils.redaction import scrub_url_credentials
+from gbserver.utils.redaction import sanitize_log_tail
 from gbserver.utils.unwrap_errors import (
     escape_for_one_record,
     format_oserror,
@@ -1801,20 +1801,22 @@ def _read_saved_log_tail(
     cluster_name: str,
     job_id: Optional[int],
     max_lines: int = 50,
-    max_chars: int = 4000,
+    secret_values: Optional[List[str]] = None,
 ) -> str:
-    """The tail of the runner's local copy of a SkyPilot job log.
+    """The sanitized tail of the runner's local copy of a SkyPilot job log.
 
     Reads the copy ``_download_and_parse_logs`` saved under
     ``_LOCAL_LOG_ROOT/<cluster>/job-<id>/`` (preferring ``run.log``), falling back
-    to the live-stream file ``_LOCAL_LOG_ROOT/<cluster>/job-<id>.log``. URL
-    credentials are scrubbed, since the tail lands in the build log.
+    to the live-stream file ``_LOCAL_LOG_ROOT/<cluster>/job-<id>.log``. The tail
+    lands in the build log, so it goes through the same
+    :func:`~gbserver.utils.redaction.sanitize_log_tail` as LSF's: secrets
+    redacted, size capped with a truncation marker, ``` fences defused.
 
     :param cluster_name: the SkyPilot cluster the job ran on.
     :param job_id: the SkyPilot job id, or ``None`` if the launch never got one.
     :param max_lines: keep at most this many trailing lines.
-    :param max_chars: keep at most this many trailing characters.
-    :returns: the scrubbed tail without a trailing newline, or ``""`` when no
+    :param secret_values: the launch's declared secret values, masked verbatim.
+    :returns: the sanitized tail without a trailing newline, or ``""`` when no
         saved log exists or it can't be read.
     """
     if job_id is None:
@@ -1832,8 +1834,7 @@ def _read_saved_log_tail(
     except OSError as e:
         logger.warning("Failed to read the job log tail from %s: %s", path, e)
         return ""
-    tail = scrub_url_credentials("".join(lines).rstrip("\n"))
-    return tail[-max_chars:]
+    return sanitize_log_tail("".join(lines).rstrip("\n"), secret_values) or ""
 
 
 def _resolved_shared_fs_dns(setup_config) -> dict:
@@ -4705,7 +4706,11 @@ class Skypilot(Environment):
         log_dir = self._job_log_dirs.get(launch_id)
         if log_dir:
             msg += f"\nFull job log: {log_dir}/job.log"
-        tail = _read_saved_log_tail(cluster_name, job_id)
+        tail = _read_saved_log_tail(
+            cluster_name,
+            job_id,
+            secret_values=self.get_launch_secret_values(launch_id),
+        )
         if tail:
             msg += f"\nLast lines of the job log:\n```\n{tail}\n```"
         return msg

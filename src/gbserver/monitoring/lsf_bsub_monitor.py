@@ -50,6 +50,7 @@ from gbserver.types.errors import (
 )
 from gbserver.types.status import Status
 from gbserver.utils.logger import get_logger
+from gbserver.utils.redaction import sanitize_log_tail
 from gbserver.utils.ssh_tunnel import SshTunnel
 from gbserver.utils.utils import cmd_safe_join
 
@@ -64,26 +65,8 @@ _FAILURE_LOG_TAIL_LINES = 40
 # Hard bound on the (best-effort) tail read: it sits on the failure-emission path,
 # so a wedged SSH must not delay the Failed event beyond this.
 _FAILURE_LOG_TAIL_TIMEOUT_S = 30
-# Byte cap on the attached tail: line count alone doesn't bound width, and this
-# text rides into the event, failure_reason, and the PR body. Keep the tail end
-# (where the traceback is).
-_FAILURE_LOG_TAIL_MAX_BYTES = 8192
-
-
-def _sanitize_log_tail(content: Optional[str]) -> Optional[str]:
-    """Make a raw log tail safe to embed in an event/PR markdown code block.
-
-    Caps the byte width (keeping the tail end, where the traceback is) and
-    neutralizes triple-backticks so remote log content can't break the ```` ``` ````
-    fence in the failure ``<details>`` block. Display-only; nothing parses this."""
-    if not content:
-        return None
-    encoded = content.encode("utf-8", errors="replace")
-    if len(encoded) > _FAILURE_LOG_TAIL_MAX_BYTES:
-        content = "...[truncated]...\n" + encoded[-_FAILURE_LOG_TAIL_MAX_BYTES:].decode(
-            "utf-8", errors="replace"
-        )
-    return content.replace("```", "``​`")
+# The tail's byte cap, secret redaction and fence handling live in
+# gbserver.utils.redaction.sanitize_log_tail, shared with the SkyPilot backend.
 
 
 class LsfStateClass(StrEnum):
@@ -547,7 +530,11 @@ class LSFBsubMonitor(MonitorBase):
             content = await asyncio.wait_for(
                 self._run_log_tail_cmd(tail_cmd), timeout=_FAILURE_LOG_TAIL_TIMEOUT_S
             )
-            return _sanitize_log_tail(content)
+            # Shared with SkyPilot: redacts secrets (incl. this launch's declared
+            # secret values), caps the size, and defuses ``` fences.
+            return sanitize_log_tail(
+                content, self.lsf.get_launch_secret_values(self.launch_id)
+            )
         except Exception as e:  # best-effort; never mask the real failure
             # (TimeoutError from wait_for is an Exception on 3.11+; CancelledError
             # is a BaseException and still propagates.)

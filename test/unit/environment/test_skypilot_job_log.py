@@ -194,6 +194,40 @@ class TestLaunchWiresJobLog:
         assert "attempt 1 (setup)" in task_kwargs["setup"]
 
     @pytest.mark.asyncio
+    async def test_launch_secret_values_resolve_declared_secrets(self):
+        """The values masked in the tail are the launch's *declared* secrets,
+        resolved from the kwargs stashed at launch (least-privilege)."""
+        env = _make_env({"default_cloud": "slurm", "shared_workdir": "/shared"})
+        env.secrets = {"MY_DB_PW": "declaredvalue123", "UNRELATED": "othervalue456"}
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+        ):
+            env._get_launch_ready_event("jl-4")
+            await env.launch_skypilot(
+                launch_id="jl-4",
+                launcher_config={"run": "hostname"},
+                config={
+                    "skypilot": {
+                        "secrets": {
+                            "secret_names_to_use_as_env_variable": [
+                                {"env_name": "DB_PW", "secret_name": "MY_DB_PW"}
+                            ]
+                        }
+                    }
+                },
+                run_metadata=RUN_METADATA,
+                step={"name": "s"},
+                setup_config={"skypilot": {"build_workdir": WORKDIR}},
+            )
+        assert env.get_launch_secret_values("jl-4") == ["declaredvalue123"]
+
+    def test_unknown_launch_has_no_secret_values(self):
+        env = _make_env({"default_cloud": "slurm"})
+        assert env.get_launch_secret_values("nope") == []
+
+    @pytest.mark.asyncio
     async def test_relaunch_marks_the_next_attempt(self):
         env = _make_env({"default_cloud": "slurm", "shared_workdir": "/shared"})
         env._relaunch_attempts["jl-3"] = 2  # set by retry_workload on the 2nd retry
@@ -259,13 +293,38 @@ class TestReadLogTail:
             tail = skymod._read_saved_log_tail("gb-c", 7)
         assert "ghp_secret" not in tail
 
-    def test_caps_total_characters(self, tmp_path):
+    def test_masks_secrets_in_the_tail(self, tmp_path):
         job_dir = tmp_path / "gb-c" / "job-7"
         job_dir.mkdir(parents=True)
-        (job_dir / "run.log").write_text("x" * 50_000 + "\nlast\n")
+        (job_dir / "run.log").write_text(
+            "HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz\nusing declaredvalue123\n"
+        )
         with patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)):
-            tail = skymod._read_saved_log_tail("gb-c", 7, max_chars=100)
-        assert len(tail) <= 100
+            tail = skymod._read_saved_log_tail(
+                "gb-c", 7, secret_values=["declaredvalue123"]
+            )
+        assert "hf_abcdefghijklmnopqrstuvwxyz" not in tail
+        assert "declaredvalue123" not in tail
+
+    def test_neutralizes_fences(self, tmp_path):
+        """The tail is embedded in a ``` fence; a fence in the log can't close it."""
+        job_dir = tmp_path / "gb-c" / "job-7"
+        job_dir.mkdir(parents=True)
+        (job_dir / "run.log").write_text("before ``` after\n")
+        with patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)):
+            tail = skymod._read_saved_log_tail("gb-c", 7)
+        assert "```" not in tail
+        assert "before" in tail and "after" in tail
+
+    def test_caps_total_size_with_truncation_marker(self, tmp_path):
+        from gbserver.utils.redaction import LOG_TAIL_MAX_BYTES
+
+        job_dir = tmp_path / "gb-c" / "job-7"
+        job_dir.mkdir(parents=True)
+        (job_dir / "run.log").write_text("x" * (LOG_TAIL_MAX_BYTES * 2) + "\nlast\n")
+        with patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)):
+            tail = skymod._read_saved_log_tail("gb-c", 7)
+        assert tail.startswith("...[truncated]...")
         assert tail.endswith("last")
 
 
@@ -285,9 +344,21 @@ class TestFailureCarriesLogTail:
         env._cluster_names["lf-1"] = "gb-c"
         env._job_ids["lf-1"] = 7
         env._job_log_dirs["lf-1"] = LOG_DIR
+        env.secrets = {"DB_PW": "declaredvalue123"}
+        env._launch_kwargs["lf-1"] = {
+            "config": {
+                "skypilot": {
+                    "secrets": {
+                        "secret_names_to_use_as_env_variable": [{"env_name": "DB_PW"}]
+                    }
+                }
+            }
+        }
         job_dir = tmp_path / "gb-c" / "job-7"
         job_dir.mkdir(parents=True)
-        (job_dir / "run.log").write_text("starting\nTraceback: boom\n")
+        (job_dir / "run.log").write_text(
+            "starting with declaredvalue123\nTraceback: boom\n"
+        )
         return env
 
     @pytest.mark.asyncio
@@ -307,6 +378,7 @@ class TestFailureCarriesLogTail:
                     poll_interval=0,
                 )
         assert "Traceback: boom" in str(exc.value)
+        assert "declaredvalue123" not in str(exc.value)
         assert f"{LOG_DIR}/job.log" in str(exc.value)
         events = []
         while not event_q.empty():
@@ -314,3 +386,4 @@ class TestFailureCarriesLogTail:
         [fail] = [e for e in events if e.type == BuildEventType.WORKLOAD_STATUS_EVENT]
         assert fail.payload.status == Status.FAILED
         assert "Traceback: boom" in fail.payload.data["error"]
+        assert "declaredvalue123" not in fail.payload.data["error"]
