@@ -1759,6 +1759,21 @@ def _job_log_dir(
     return os.path.join(shared_workdir, str(sub_dir), "outputs")
 
 
+# Writes ``<log>.metadata`` beside the job log, in exactly the format the native LSF
+# wrapper (``llmb_lsf_wrapper.sh``) uses, so whatever ships LSF job logs from the shared
+# FS labels SkyPilot ones with the build id that ``gb build log`` filters on. Overwritten
+# (not appended) on every phase so it stays one valid YAML document. Skipped when there
+# is no real log file or no GB_BUILD_ID (an empty label is worse than none).
+_JOB_LOG_METADATA_SNIPPET = (
+    'if [ "$__gb_log" != /dev/null ] && [ -n "${GB_BUILD_ID:-}" ]; then\n'
+    '  printf "labels:\\n'
+    "  kubernetes.labels.granite-dot-build/build-id: %s\\n"
+    '  kubernetes.labels.llmbuild/build-id: %s\\n" '
+    '"$GB_BUILD_ID" "$GB_BUILD_ID" > "$__gb_log.metadata" 2>/dev/null || true\n'
+    "fi\n"
+)
+
+
 def _with_job_log(
     job_log_dir: Optional[str], body: str, phase: str, attempt: int
 ) -> str:
@@ -1771,6 +1786,9 @@ def _with_job_log(
     the pipeline only ends once ``tee`` has flushed, on any bash version.
     Best-effort: if the directory can't be created the output goes to
     ``/dev/null`` instead, with a warning, and the step still runs.
+
+    Like the native LSF wrapper, it also writes ``<log>.metadata`` beside the log
+    (build-id labels; see ``_JOB_LOG_METADATA_SNIPPET``) so log shipping labels it.
 
     A relaunch reuses the launch_id and so the same log file, appending to it as
     native LSF does. Each phase therefore first writes a marker line, to the
@@ -1797,7 +1815,8 @@ def _with_job_log(
         '  echo "granite.build: cannot write the job log $__gb_log; continuing without it" >&2\n'
         "  __gb_log=/dev/null\n"
         "fi\n"
-        f'echo "{marker} $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "$__gb_log" || true\n'
+        + _JOB_LOG_METADATA_SNIPPET
+        + f'echo "{marker} $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "$__gb_log" || true\n'
         "{\n"
         f"{body}\n"
         '} 2>&1 | tee -a "$__gb_log"\n'

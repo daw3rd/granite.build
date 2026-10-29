@@ -100,7 +100,9 @@ admin provisions — gbserver does not create or mount it. When set, `shared_wor
   (exported as `GB_JOB_LOG_DIR`), so on bluevela, where `shared_workdir` equals the LSF
   `workspace.remote_dir`, SkyPilot and LSF job logs sit side by side and whatever collects LSF logs
   sees both. The launcher tees both `setup` and `run` stdout/stderr into it (setup first; node rank
-  N>0 writes `job.rankN.log`). It is outside the per-run workdir, so teardown leaves it in place on
+  N>0 writes `job.rankN.log`). Like native LSF, a `job.log.metadata` file beside it carries the
+  build-id labels (`kubernetes.labels.granite-dot-build/build-id`) that log shipping uses, so
+  `gb build log` can find the build. It is outside the per-run workdir, so teardown leaves it in place on
   success and failure — like LSF's, nothing reaps it. Unlike the per-run workdir, retries do **not** get
   a fresh log: a relaunch keeps its `launch_id`, so (as on native LSF) every attempt appends to the same
   `job.log`. Each phase starts with a marker line,

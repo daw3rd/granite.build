@@ -155,6 +155,64 @@ class TestWithJobLog:
         assert "cannot write the job log" in proc.stderr
 
 
+BUILD_ID = "504c7f0f-659e-4227-ba5e-68cb8a53698a"
+# Byte-for-byte what the native LSF wrapper (llmb_lsf_wrapper.sh) writes next to
+# its job.log, so whatever ships LSF logs labels SkyPilot ones the same way.
+LSF_METADATA = (
+    "labels:\n"
+    f"  kubernetes.labels.granite-dot-build/build-id: {BUILD_ID}\n"
+    f"  kubernetes.labels.llmbuild/build-id: {BUILD_ID}\n"
+)
+
+
+class TestJobLogMetadata:
+    def test_metadata_matches_the_lsf_wrapper_format(self, tmp_path):
+        env = {"GB_JOB_LOG_DIR": str(tmp_path), "GB_BUILD_ID": BUILD_ID}
+        _run_wrapped("echo hi", env)
+        assert (tmp_path / "job.log.metadata").read_text() == LSF_METADATA
+
+    def test_metadata_is_overwritten_not_appended(self, tmp_path):
+        """Each phase/attempt rewrites it, so it stays one valid YAML doc."""
+        env = {"GB_JOB_LOG_DIR": str(tmp_path), "GB_BUILD_ID": BUILD_ID}
+        _run_wrapped("echo setup", env, phase="setup")
+        _run_wrapped("echo run", env, phase="run")
+        _run_wrapped("echo retry", env, phase="run", attempt=1)
+        assert (tmp_path / "job.log.metadata").read_text() == LSF_METADATA
+
+    def test_metadata_is_not_in_the_skypilot_log_stream(self, tmp_path):
+        env = {"GB_JOB_LOG_DIR": str(tmp_path), "GB_BUILD_ID": BUILD_ID}
+        proc = _run_wrapped("echo body", env)
+        assert proc.stdout == "body\n"
+
+    def test_each_rank_log_gets_its_own_metadata(self, tmp_path):
+        env = {
+            "GB_JOB_LOG_DIR": str(tmp_path),
+            "GB_BUILD_ID": BUILD_ID,
+            "SKYPILOT_NODE_RANK": "1",
+        }
+        _run_wrapped("echo rank-one", env)
+        assert (tmp_path / "job.rank1.log.metadata").read_text() == LSF_METADATA
+        assert not (tmp_path / "job.log.metadata").exists()
+
+    def test_no_build_id_means_no_metadata(self, tmp_path):
+        """An empty label would be worse than none: skip it."""
+        proc = _run_wrapped("echo hi", {"GB_JOB_LOG_DIR": str(tmp_path)})
+        assert proc.returncode == 0
+        assert (tmp_path / "job.log").exists()
+        assert not (tmp_path / "job.log.metadata").exists()
+
+    def test_unwritable_log_dir_writes_no_metadata_and_runs(self, tmp_path):
+        blocker = tmp_path / "file"
+        blocker.write_text("")
+        proc = _run_wrapped(
+            "echo body-ran",
+            {"GB_JOB_LOG_DIR": str(blocker / "sub"), "GB_BUILD_ID": BUILD_ID},
+        )
+        assert proc.returncode == 0
+        assert "body-ran" in proc.stdout
+        assert not list(tmp_path.glob("**/*.metadata"))
+
+
 def _body_lines(path):
     """job.log lines without the granite.build attempt markers."""
     return [
@@ -185,6 +243,9 @@ class TestLaunchWiresJobLog:
         task_kwargs = mock_sky.Task.call_args[1]
         expected_dir = LOG_DIR.replace("launch-l-1", "launch-jl-1")
         assert task_kwargs["envs"]["GB_JOB_LOG_DIR"] == expected_dir
+        # job.log.metadata takes the build id from here at run time.
+        assert task_kwargs["envs"]["GB_BUILD_ID"] == RUN_METADATA["build_id"]
+        assert '"$__gb_log.metadata"' in task_kwargs["run"]
         assert "job.log" in task_kwargs["run"]
         assert "\nhostname\n" in task_kwargs["run"]
         assert "job.log" in task_kwargs["setup"]
