@@ -8,7 +8,6 @@ require it unless a Skypilot environment is actually configured.
 """
 
 import asyncio
-import collections
 import concurrent.futures
 import functools
 import glob
@@ -185,6 +184,9 @@ _DEFAULT_POLL_FAILURE_GRACE_SECONDS = 900
 # Runner-local root for the downloaded and live-streamed copies of SkyPilot job
 # logs (<root>/<cluster>/job-<id>/ and <root>/<cluster>/job-<id>.log).
 _LOCAL_LOG_ROOT = "/tmp/sky-logs"
+# How much of a job log's end to read for the failure tail. Bounds the read for
+# multi-GB logs; comfortably above sanitize_log_tail's display cap.
+_LOG_TAIL_READ_BYTES = 64 * 1024
 # For LSF clusters the grace is followed by a direct `bjobs` check, and a job LSF
 # still reports as alive -- or one LSF cannot be asked about -- is kept until this
 # ceiling. Bounded, because a cluster SkyPilot can no longer see is one this
@@ -1829,12 +1831,34 @@ def _read_saved_log_tail(
     if path is None:
         return ""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = collections.deque(f, maxlen=max_lines)
+        text = _read_file_end(path, _LOG_TAIL_READ_BYTES)
     except OSError as e:
         logger.warning("Failed to read the job log tail from %s: %s", path, e)
         return ""
-    return sanitize_log_tail("".join(lines).rstrip("\n"), secret_values) or ""
+    lines = text.rstrip("\n").split("\n")[-max_lines:]
+    return sanitize_log_tail("\n".join(lines), secret_values) or ""
+
+
+def _read_file_end(path: str, max_bytes: int) -> str:
+    """The last ``max_bytes`` of a file, decoded, starting on a line boundary.
+
+    Seeks from the end, so the cost is bounded by ``max_bytes`` however large the
+    file is. When the read starts mid-file, the (usually partial) first line is
+    dropped.
+
+    :param path: the file to read.
+    :param max_bytes: the most bytes to read from the end.
+    :returns: the decoded text (invalid UTF-8 replaced).
+    :raises OSError: if the file can't be opened or read.
+    """
+    with open(path, "rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        start = max(0, size - max_bytes)
+        f.seek(start)
+        data = f.read(max_bytes)
+    if start > 0:
+        data = data.partition(b"\n")[2]
+    return data.decode("utf-8", errors="replace")
 
 
 def _resolved_shared_fs_dns(setup_config) -> dict:
@@ -4632,7 +4656,7 @@ class Skypilot(Environment):
                             terminal_resume, new_last
                         )
                 if str(status) != "JobStatus.SUCCEEDED":
-                    terminal_msg = self._terminal_failure_message(
+                    terminal_msg = await self._terminal_failure_message(
                         launch_id, cluster_name, job_id, status
                     )
                     if event_q and entityrun_metadata:
@@ -4686,10 +4710,13 @@ class Skypilot(Environment):
             except asyncio.TimeoutError:
                 pass  # Normal timeout, continue polling
 
-    def _terminal_failure_message(
+    async def _terminal_failure_message(
         self: Self, launch_id: str, cluster_name: str, job_id: Optional[int], status
     ) -> str:
         """Describe a non-success terminal job: status, durable log, log tail.
+
+        The log read runs in a worker thread so a slow filesystem can't stall
+        the event loop shared by every launch's poll.
 
         :param launch_id: the failed launch.
         :param cluster_name: the SkyPilot cluster the job ran on.
@@ -4706,7 +4733,8 @@ class Skypilot(Environment):
         log_dir = self._job_log_dirs.get(launch_id)
         if log_dir:
             msg += f"\nFull job log: {log_dir}/job.log"
-        tail = _read_saved_log_tail(
+        tail = await asyncio.to_thread(
+            _read_saved_log_tail,
             cluster_name,
             job_id,
             secret_values=self.get_launch_secret_values(launch_id),

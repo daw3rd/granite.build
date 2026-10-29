@@ -265,6 +265,55 @@ class TestLaunchWiresJobLog:
 
 
 class TestReadLogTail:
+    def test_reads_only_the_end_of_a_large_file(self, tmp_path):
+        """A multi-GB log must not be scanned line by line: only a bounded chunk
+        from the end is read, however big the file is."""
+        job_dir = tmp_path / "gb-c" / "job-7"
+        job_dir.mkdir(parents=True)
+        path = job_dir / "run.log"
+        with path.open("w") as f:
+            f.write("filler line\n" * 200_000)  # ~2.4 MB
+            f.write("Traceback: the real error\n")
+        reads = []
+        real_open = open
+
+        def spy_open(*args, **kwargs):
+            handle = real_open(*args, **kwargs)
+            real_read = handle.read
+
+            def read(size=-1):
+                data = real_read(size)
+                reads.append(len(data))
+                return data
+
+            handle.read = read
+            return handle
+
+        with (
+            patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)),
+            patch("builtins.open", spy_open),
+        ):
+            tail = skymod._read_saved_log_tail("gb-c", 7, max_lines=3)
+        assert tail.endswith("Traceback: the real error")
+        assert sum(reads) <= skymod._LOG_TAIL_READ_BYTES
+        assert path.stat().st_size > 10 * skymod._LOG_TAIL_READ_BYTES
+
+    def test_tail_starts_on_a_line_boundary(self, tmp_path):
+        """The chunk read from the end usually starts mid-line; that partial
+        first line is dropped rather than shown as a fragment."""
+        job_dir = tmp_path / "gb-c" / "job-7"
+        job_dir.mkdir(parents=True)
+        # Big enough that the read starts mid-file, mid-line.
+        (job_dir / "run.log").write_text(
+            "".join(f"line-{i:06d}\n" for i in range(50_000))
+        )
+        assert (job_dir / "run.log").stat().st_size > skymod._LOG_TAIL_READ_BYTES
+        with patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)):
+            tail = skymod._read_saved_log_tail("gb-c", 7, max_lines=100)
+        lines = [l for l in tail.splitlines() if l != "...[truncated]..."]
+        assert all(l.startswith("line-") and len(l) == 11 for l in lines)
+        assert lines[-1] == "line-049999"
+
     def test_reads_last_lines_of_downloaded_copy(self, tmp_path):
         job_dir = tmp_path / "gb-c" / "job-7"
         job_dir.mkdir(parents=True)
@@ -387,3 +436,33 @@ class TestFailureCarriesLogTail:
         assert fail.payload.status == Status.FAILED
         assert "Traceback: boom" in fail.payload.data["error"]
         assert "declaredvalue123" not in fail.payload.data["error"]
+
+    @pytest.mark.asyncio
+    async def test_tail_is_read_off_the_event_loop(self, tmp_path):
+        """The file read runs in a worker thread, so a slow or huge log can't
+        stall every other launch's polling on the shared event loop."""
+        import threading
+
+        env = self._env(tmp_path)
+        loop_thread = threading.get_ident()
+        read_threads = []
+        real_read = skymod._read_saved_log_tail
+
+        def spy(*args, **kwargs):
+            read_threads.append(threading.get_ident())
+            return real_read(*args, **kwargs)
+
+        with (
+            patch.object(skymod, "sky", _failed_sky()),
+            patch.object(skymod, "HAS_SKYPILOT", True),
+            patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)),
+            patch.object(skymod, "_read_saved_log_tail", spy),
+        ):
+            with pytest.raises(WorkloadFailedException):
+                await env._poll_skypilot_job(
+                    launch_id="lf-1",
+                    event_q=asyncio.Queue(),
+                    entityrun_metadata=EntityRunMetadata(build_id="b"),
+                    poll_interval=0,
+                )
+        assert read_threads and loop_thread not in read_threads
