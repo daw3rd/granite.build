@@ -830,9 +830,14 @@ class RetryHandler:
             if state:
                 return f"{prefix} workload is in a {state} state."
 
-        # No parseable JSON (or JSON with no appwrapper/error/state): original
-        # wording, distinguishing "no message" from "message present but not JSON".
+        # No parseable JSON (or JSON with no appwrapper/error/state). A message-less
+        # event may still carry its detail in payload.data["error"] (SkyPilot's
+        # FAILED WORKLOAD_STATUS_EVENT); otherwise keep the original wording,
+        # distinguishing "no message" from "message present but not JSON".
         msg = getattr(event.payload, "msg", None) if event.payload else None
         if not msg:
+            status_error = (getattr(event.payload, "data", None) or {}).get("error")
+            if status_error:
+                return f"[RetryHandler launch_id {self.launch_id}] {status_error}"
             return f"Workload failed for launch_id {self.launch_id}"
         return f"[RetryHandler launch_id {self.launch_id}] Workload failed. See event message for details."
