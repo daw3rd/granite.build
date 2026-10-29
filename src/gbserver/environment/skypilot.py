@@ -1751,7 +1751,9 @@ def _job_log_dir(
     return os.path.join(shared_workdir, str(sub_dir), "outputs")
 
 
-def _with_job_log(job_log_dir: Optional[str], body: str) -> str:
+def _with_job_log(
+    job_log_dir: Optional[str], body: str, phase: str, attempt: int
+) -> str:
     """Wrap a step script body so its output is also kept in the job log.
 
     Runs ``body`` in a ``{ ...; }`` group piped through ``tee -a`` into
@@ -1762,14 +1764,23 @@ def _with_job_log(job_log_dir: Optional[str], body: str) -> str:
     Best-effort: if the directory can't be created the output goes to
     ``/dev/null`` instead, with a warning, and the step still runs.
 
+    A relaunch reuses the launch_id and so the same log file, appending to it as
+    native LSF does. Each phase therefore first writes a marker line, to the
+    log only (not to SkyPilot's log, so event parsers see just the step's
+    output): ``=== granite.build: attempt <N> (<phase>) at <UTC time> ===``.
+
     :param job_log_dir: the launch's log dir (exported as ``GB_JOB_LOG_DIR``),
         or ``None`` when no log is kept (the body is returned unchanged).
     :param body: the step's setup or run script. Both phases append to the
         same file, so setup output precedes the run output.
-    :returns: the wrapped script, or ``body`` unchanged without a workdir.
+    :param phase: ``"setup"`` or ``"run"``, named in the marker.
+    :param attempt: 0 for the first launch, N for the Nth relaunch
+        (``_relaunch_attempts``); the marker shows it 1-based.
+    :returns: the wrapped script, or ``body`` unchanged without a log dir.
     """
     if not job_log_dir:
         return body
+    marker = f"=== granite.build: attempt {attempt + 1} ({phase}) at"
     return (
         '__gb_rank="${SKYPILOT_NODE_RANK:-${SKYPILOT_SETUP_NODE_RANK:-0}}"\n'
         '__gb_log="$GB_JOB_LOG_DIR/job.log"\n'
@@ -1778,6 +1789,7 @@ def _with_job_log(job_log_dir: Optional[str], body: str) -> str:
         '  echo "granite.build: cannot write the job log $__gb_log; continuing without it" >&2\n'
         "  __gb_log=/dev/null\n"
         "fi\n"
+        f'echo "{marker} $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> "$__gb_log" || true\n'
         "{\n"
         f"{body}\n"
         '} 2>&1 | tee -a "$__gb_log"\n'
@@ -3771,10 +3783,12 @@ class Skypilot(Environment):
             # outputs/ dir, outside the per-run workdir, so it survives
             # teardown's rm -rf of that workdir. Both append: setup comes first.
             run_script = cli_prefix + _with_job_log(
-                job_log_dir, launcher_config.get("run", "")
+                job_log_dir, launcher_config.get("run", ""), "run", attempt
             )
             if setup_script:
-                setup_script = cli_prefix + _with_job_log(job_log_dir, setup_script)
+                setup_script = cli_prefix + _with_job_log(
+                    job_log_dir, setup_script, "setup", attempt
+                )
 
             # Build sky.Task
             task = sky.Task(

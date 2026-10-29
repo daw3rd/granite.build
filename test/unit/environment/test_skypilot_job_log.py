@@ -67,8 +67,8 @@ class TestJobLogDir:
         assert skymod._job_log_dir("/shared", RUN_METADATA, "", "l-1") is None
 
 
-def _run_wrapped(body, env):
-    script = "set -eu\n" + skymod._with_job_log(LOG_DIR, body)
+def _run_wrapped(body, env, phase="run", attempt=0):
+    script = "set -eu\n" + skymod._with_job_log(LOG_DIR, body, phase, attempt)
     return subprocess.run(
         ["bash", "-c", script],
         env={"PATH": "/usr/bin:/bin", **env},
@@ -79,7 +79,7 @@ def _run_wrapped(body, env):
 
 class TestWithJobLog:
     def test_no_log_dir_returns_body_unchanged(self):
-        assert skymod._with_job_log(None, "hostname") == "hostname"
+        assert skymod._with_job_log(None, "hostname", "run", 0) == "hostname"
 
     def test_captures_stdout_and_stderr_and_keeps_exit_code(self, tmp_path):
         """Run the wrapped script for real: both streams land in the file, still
@@ -109,9 +109,32 @@ class TestWithJobLog:
 
     def test_setup_and_run_share_one_log_in_order(self, tmp_path):
         env = {"GB_JOB_LOG_DIR": str(tmp_path)}
-        _run_wrapped("echo from-setup", env)
-        _run_wrapped("echo from-run", env)
-        assert (tmp_path / "job.log").read_text() == "from-setup\nfrom-run\n"
+        _run_wrapped("echo from-setup", env, phase="setup")
+        _run_wrapped("echo from-run", env, phase="run")
+        assert _body_lines(tmp_path / "job.log") == ["from-setup", "from-run"]
+
+    def test_each_phase_starts_with_an_attempt_marker(self, tmp_path):
+        """Retries reuse the launch's dir and append (as native LSF does), so
+        every phase opens with a marker naming its attempt and phase."""
+        env = {"GB_JOB_LOG_DIR": str(tmp_path)}
+        _run_wrapped("echo first-setup", env, phase="setup", attempt=0)
+        _run_wrapped("echo first-run", env, phase="run", attempt=0)
+        _run_wrapped("echo second-run", env, phase="run", attempt=1)
+        lines = (tmp_path / "job.log").read_text().splitlines()
+        markers = [l for l in lines if l.startswith("=== granite.build:")]
+        assert [m.split(" at ")[0] for m in markers] == [
+            "=== granite.build: attempt 1 (setup)",
+            "=== granite.build: attempt 1 (run)",
+            "=== granite.build: attempt 2 (run)",
+        ]
+        # The marker sits right before its phase's output.
+        assert lines.index("second-run") == lines.index(markers[2]) + 1
+
+    def test_marker_is_not_in_the_skypilot_log_stream(self, tmp_path):
+        """The marker goes only to job.log, so the artifact/event parsers that
+        read SkyPilot's own log see exactly the step's output."""
+        proc = _run_wrapped("echo body", {"GB_JOB_LOG_DIR": str(tmp_path)})
+        assert proc.stdout == "body\n"
 
     def test_non_zero_rank_writes_its_own_file(self, tmp_path):
         _run_wrapped(
@@ -130,6 +153,15 @@ class TestWithJobLog:
         assert proc.returncode == 0
         assert "body-ran" in proc.stdout
         assert "cannot write the job log" in proc.stderr
+
+
+def _body_lines(path):
+    """job.log lines without the granite.build attempt markers."""
+    return [
+        l
+        for l in path.read_text().splitlines()
+        if not l.startswith("=== granite.build:")
+    ]
 
 
 class TestLaunchWiresJobLog:
@@ -158,6 +190,28 @@ class TestLaunchWiresJobLog:
         assert "job.log" in task_kwargs["setup"]
         assert "\necho prep\n" in task_kwargs["setup"]
         assert env._job_log_dirs["jl-1"] == expected_dir
+        assert "attempt 1 (run)" in task_kwargs["run"]
+        assert "attempt 1 (setup)" in task_kwargs["setup"]
+
+    @pytest.mark.asyncio
+    async def test_relaunch_marks_the_next_attempt(self):
+        env = _make_env({"default_cloud": "slurm", "shared_workdir": "/shared"})
+        env._relaunch_attempts["jl-3"] = 2  # set by retry_workload on the 2nd retry
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+        ):
+            env._get_launch_ready_event("jl-3")
+            await env.launch_skypilot(
+                launch_id="jl-3",
+                launcher_config={"run": "hostname"},
+                config={},
+                run_metadata=RUN_METADATA,
+                step={"name": "s"},
+                setup_config={"skypilot": {"build_workdir": WORKDIR}},
+            )
+        assert "attempt 3 (run)" in mock_sky.Task.call_args[1]["run"]
 
     @pytest.mark.asyncio
     async def test_launch_without_shared_workdir_has_no_log_dir(self):
