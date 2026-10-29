@@ -105,7 +105,10 @@ admin provisions — gbserver does not create or mount it. When set, `shared_wor
   a fresh log: a relaunch keeps its `launch_id`, so (as on native LSF) every attempt appends to the same
   `job.log`. Each phase starts with a marker line,
   `=== granite.build: attempt <N> (setup|run) at <UTC time> ===`, so you can tell the attempts apart.
-  When a job fails, the failure message names this file and includes the last lines of the job's output.
+  When a job fails, the failure message names this file and includes the last lines of SkyPilot's own log
+  for the failed attempt (setup and all ranks, with SkyPilot's line prefixes). gbserver reads that log
+  through the SkyPilot API, since it can't reach the cluster's shared FS where `job.log` lives; read
+  `job.log` itself for the plain output of every attempt.
 
 When unset, gbserver-managed caches fall back to `~/.cache/gbserver/<store>` on the worker, which only
 works when consecutive steps land on the same machine. Example paths per backend: `slurm: /shared`

@@ -428,6 +428,8 @@ class TestFailureCarriesLogTail:
                 )
         assert "Traceback: boom" in str(exc.value)
         assert "declaredvalue123" not in str(exc.value)
+        # The tail is SkyPilot's log of this attempt, not job.log: say so.
+        assert "Last lines of SkyPilot's log for this attempt" in str(exc.value)
         assert f"{LOG_DIR}/job.log" in str(exc.value)
         events = []
         while not event_q.empty():

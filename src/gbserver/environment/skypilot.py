@@ -1818,6 +1818,17 @@ def _read_saved_log_tail(
     :func:`~gbserver.utils.redaction.sanitize_log_tail` as LSF's: secrets
     redacted, size capped with a truncation marker, ``` fences defused.
 
+    Why not the persisted ``job.log`` the failure message names: that file is on
+    the cluster's shared FS, which gbserver can't reach — SkyPilot's API
+    (``sky.download_logs``) is its only channel to job output, and an SSH read
+    would add a slow, failure-prone hop to every failure. The top-level
+    ``run.log`` is SkyPilot's combined stream for the attempt: it includes setup
+    (``(setup pid=…)`` lines) and, on multi-node jobs, every rank (``(head,
+    rank=0)``, ``(worker1, rank=1)``…). It differs from ``job.log`` only in
+    those prefixes, SkyPilot's status lines, and in covering this attempt alone
+    where ``job.log`` covers them all — so the message labels the tail as
+    SkyPilot's log for this attempt.
+
     :param cluster_name: the SkyPilot cluster the job ran on.
     :param job_id: the SkyPilot job id, or ``None`` if the launch never got one.
     :param max_lines: keep at most this many trailing lines.
@@ -4779,7 +4790,8 @@ class Skypilot(Environment):
         :param status: the terminal ``sky.JobStatus``.
         :returns: a multi-line message naming the persistent job log (when the
             environment has a ``shared_workdir``) and ending with the tail of
-            the job's output (when a local copy was saved).
+            SkyPilot's log for this attempt (see :func:`_read_saved_log_tail` for
+            why the tail is not read from ``job.log``).
         """
         msg = (
             f"SkyPilot job {job_id} on {cluster_name} "
@@ -4787,7 +4799,7 @@ class Skypilot(Environment):
         )
         log_dir = self._job_log_dirs.get(launch_id)
         if log_dir:
-            msg += f"\nFull job log: {log_dir}/job.log"
+            msg += f"\nFull job log (all attempts, on the cluster): {log_dir}/job.log"
         await self._ensure_local_log_copy(cluster_name, job_id)
         tail = await asyncio.to_thread(
             _read_saved_log_tail,
@@ -4796,7 +4808,9 @@ class Skypilot(Environment):
             secret_values=self.get_launch_secret_values(launch_id),
         )
         if tail:
-            msg += f"\nLast lines of the job log:\n```\n{tail}\n```"
+            msg += (
+                "\nLast lines of SkyPilot's log for this attempt:" f"\n```\n{tail}\n```"
+            )
         return msg
 
     async def _ensure_local_log_copy(
