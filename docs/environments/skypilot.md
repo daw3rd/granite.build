@@ -94,7 +94,15 @@ admin provisions — gbserver does not create or mount it. When set, `shared_wor
   **initial CWD** of both the `setup` and `run` scripts (with no `shared_workdir` both phases instead
   share SkyPilot's default `~/sky_workdir` — either way the two phases start in the same directory). It
   is created lazily before the first step and `rm -rf`'d at target-run teardown; retries get a fresh
-  dir.
+  dir;
+- keeps each launch's output in `job.log` under the native-LSF layout,
+  `${shared_workdir}/llm-build-<build_id>/target-<target>/target-run-<id>/step-<step>/step-run-<id>/launch-<launch_id>/outputs/job.log`
+  (exported as `GB_JOB_LOG_DIR`), so on bluevela, where `shared_workdir` equals the LSF
+  `workspace.remote_dir`, SkyPilot and LSF job logs sit side by side and whatever collects LSF logs
+  sees both. The launcher tees both `setup` and `run` stdout/stderr into it (setup first; node rank
+  N>0 writes `job.rankN.log`). It is outside the per-run workdir, so teardown leaves it in place on
+  success and failure — like LSF's, nothing reaps it. When a job fails, the failure message names this
+  file and includes the last lines of the job's output.
 
 When unset, gbserver-managed caches fall back to `~/.cache/gbserver/<store>` on the worker, which only
 works when consecutive steps land on the same machine. Example paths per backend: `slurm: /shared`
