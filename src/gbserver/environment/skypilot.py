@@ -1818,16 +1818,10 @@ def _read_saved_log_tail(
     :func:`~gbserver.utils.redaction.sanitize_log_tail` as LSF's: secrets
     redacted, size capped with a truncation marker, ``` fences defused.
 
-    Why not the persisted ``job.log`` the failure message names: that file is on
-    the cluster's shared FS, which gbserver can't reach — SkyPilot's API
-    (``sky.download_logs``) is its only channel to job output, and an SSH read
-    would add a slow, failure-prone hop to every failure. The top-level
-    ``run.log`` is SkyPilot's combined stream for the attempt: it includes setup
-    (``(setup pid=…)`` lines) and, on multi-node jobs, every rank (``(head,
-    rank=0)``, ``(worker1, rank=1)``…). It differs from ``job.log`` only in
-    those prefixes, SkyPilot's status lines, and in covering this attempt alone
-    where ``job.log`` covers them all — so the message labels the tail as
-    SkyPilot's log for this attempt.
+    It reads SkyPilot's log, not the persisted ``job.log``, because gbserver can
+    only reach job output through the SkyPilot API, not the cluster's shared FS.
+    That log is SkyPilot's combined stream for this attempt (setup and all ranks,
+    with SkyPilot's line prefixes), and the failure message labels it so.
 
     :param cluster_name: the SkyPilot cluster the job ran on.
     :param job_id: the SkyPilot job id, or ``None`` if the launch never got one.
@@ -1880,16 +1874,18 @@ def _save_local_log_copy(log_dir: str, cluster_name: str, job_id: int) -> None:
 
 
 def _has_local_log_copy(cluster_name: str, job_id: int) -> bool:
-    """Whether a local copy of the job log already exists (downloaded or streamed).
+    """Whether a complete downloaded copy of the job log already exists.
+
+    Only the ``sky.download_logs`` copy counts. The live-stream file
+    (``job-<id>.log``) is not enough: the stream can lag the terminal status and
+    miss the last lines, which is where the traceback is.
 
     :param cluster_name: the SkyPilot cluster the job ran on.
     :param job_id: the SkyPilot job id.
-    :returns: True if :func:`_read_saved_log_tail` has a file to read.
+    :returns: True if a downloaded copy exists under ``job-<id>/``.
     """
     job_dir = os.path.join(_LOCAL_LOG_ROOT, cluster_name, f"job-{job_id}")
-    return bool(glob.glob(os.path.join(job_dir, "*.log"))) or os.path.isfile(
-        f"{job_dir}.log"
-    )
+    return bool(glob.glob(os.path.join(job_dir, "*.log")))
 
 
 def _fetch_local_log_copy(cluster_name: str, job_id: int) -> None:
@@ -4821,10 +4817,11 @@ class Skypilot(Environment):
     ) -> None:
         """Make sure a local log copy exists for the failure tail.
 
-        Steps with event log parsers already saved one (final pull or live
-        stream). Others never downloaded the log, so fetch it now, in a thread
-        and bounded by ``_FAILURE_LOG_DOWNLOAD_TIMEOUT_S``. Never raises: on a
-        timeout or error the failure is reported without a tail.
+        Steps with event log parsers in a pull mode already downloaded one.
+        Others (no parsers, or live-stream mode, whose file may lag) fetch it
+        now, in a thread and bounded by ``_FAILURE_LOG_DOWNLOAD_TIMEOUT_S``. A
+        timeout or error is logged and the failure is reported with whatever
+        copy exists (possibly none); a cancel propagates.
 
         :param cluster_name: the SkyPilot cluster the job ran on.
         :param job_id: the SkyPilot job id (``None``: nothing to fetch).
@@ -4835,9 +4832,9 @@ class Skypilot(Environment):
             asyncio.to_thread(_fetch_local_log_copy, cluster_name, job_id)
         )
         try:
-            await asyncio.wait_for(
-                asyncio.shield(fut), timeout=_FAILURE_LOG_DOWNLOAD_TIMEOUT_S
-            )
+            # Not wait_for: on 3.11 it can swallow a racing cancel (gh-86296).
+            async with asyncio.timeout(_FAILURE_LOG_DOWNLOAD_TIMEOUT_S):
+                await asyncio.shield(fut)
         except Exception as e:  # pylint: disable=broad-except
             logger.warning(
                 "Could not fetch the log of %s job %s for the failure tail: %s",
@@ -4847,6 +4844,10 @@ class Skypilot(Environment):
             )
             # The thread can't be interrupted; let it finish in the background.
             fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+        except asyncio.CancelledError:
+            # Same for a cancel: retrieve the result later, then propagate.
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+            raise
 
     def _start_log_stream_task(
         self: Self,

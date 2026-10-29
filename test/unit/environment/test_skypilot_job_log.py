@@ -521,6 +521,64 @@ class TestFailureCarriesLogTail:
         download.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_live_stream_file_alone_still_downloads_the_full_log(self, tmp_path):
+        """The live-stream copy (job-<id>.log) can stop short of the traceback
+        if the stream lagged the terminal status, so on failure the complete
+        log is still downloaded and preferred."""
+        env = _make_env({"default_cloud": "slurm"})
+        env._cluster_names["ls-1"] = "gb-np"
+        env._job_ids["ls-1"] = 9
+        local_root = tmp_path / "local"
+        (local_root / "gb-np").mkdir(parents=True)
+        (local_root / "gb-np" / "job-9.log").write_text("streamed, no traceback\n")
+        downloaded = tmp_path / "sky_logs" / "job-9"
+        downloaded.mkdir(parents=True)
+        (downloaded / "run.log").write_text("streamed\nTraceback: the real error\n")
+        with (
+            patch.object(skymod, "sky", _failed_sky(job_id=9)),
+            patch.object(skymod, "HAS_SKYPILOT", True),
+            patch.object(skymod, "_LOCAL_LOG_ROOT", str(local_root)),
+            patch.object(
+                skymod, "_download_logs_with_retry", return_value=str(downloaded)
+            ) as download,
+        ):
+            with pytest.raises(WorkloadFailedException) as exc:
+                await env._poll_skypilot_job(
+                    launch_id="ls-1",
+                    event_q=asyncio.Queue(),
+                    entityrun_metadata=EntityRunMetadata(build_id="b"),
+                    poll_interval=0,
+                )
+        download.assert_called_once_with("gb-np", 9)
+        assert "Traceback: the real error" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_the_download_is_not_swallowed(self, tmp_path):
+        """A runner cancel while the failure-time download is in flight must
+        propagate (asyncio.wait_for can swallow it on 3.11; asyncio.timeout
+        does not)."""
+        import threading
+
+        env = _make_env({"default_cloud": "slurm"})
+        release = threading.Event()
+        with (
+            patch.object(skymod, "_LOCAL_LOG_ROOT", str(tmp_path)),
+            patch.object(
+                skymod,
+                "_download_logs_with_retry",
+                side_effect=lambda *_: release.wait(10),
+            ),
+        ):
+            task = asyncio.create_task(env._ensure_local_log_copy("gb-np", 9))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                release.set()
+
+    @pytest.mark.asyncio
     async def test_a_hung_download_does_not_delay_the_failure(self, tmp_path):
         """The tail is best-effort: a download stuck in SkyPilot's retries is
         abandoned after the timeout and the failure is reported without it."""

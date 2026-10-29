@@ -65,8 +65,6 @@ _FAILURE_LOG_TAIL_LINES = 40
 # Hard bound on the (best-effort) tail read: it sits on the failure-emission path,
 # so a wedged SSH must not delay the Failed event beyond this.
 _FAILURE_LOG_TAIL_TIMEOUT_S = 30
-# The tail's byte cap, secret redaction and fence handling live in
-# gbserver.utils.redaction.sanitize_log_tail, shared with the SkyPilot backend.
 
 
 class LsfStateClass(StrEnum):
