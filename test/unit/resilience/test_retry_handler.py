@@ -854,6 +854,15 @@ class TestExtractFailureMessage:
         msg = self._handler()._extract_failure_message(event)
         assert msg == "[RetryHandler launch_id 2c26a9c0] Traceback: boom"
 
+    def test_payload_error_wins_over_a_non_json_message(self: Self) -> None:
+        # An event carrying both a free-text msg and a structured
+        # payload.data["error"] must surface the structured detail, not the
+        # generic "See event message" fallback.
+        event = create_test_event("some plain failure text, not json")
+        event.payload.data = {"error": "Traceback: boom"}
+        msg = self._handler()._extract_failure_message(event)
+        assert msg == "[RetryHandler launch_id 2c26a9c0] Traceback: boom"
+
     def test_non_json_message_falls_back_to_generic(self: Self) -> None:
         # A message with no ```json``` block at all -> the generic fallback.
         event = create_test_event("some plain failure text, not json")
