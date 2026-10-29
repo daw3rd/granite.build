@@ -27,7 +27,7 @@ Covers two behaviors:
 
 import asyncio
 import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from libgbtest.environments.skypilot_mocks import _make_env, _mock_sky
@@ -246,6 +246,39 @@ class TestLaunchWiresJobLog:
                 setup_config={"skypilot": {"build_workdir": WORKDIR}},
             )
         assert "attempt 3 (run)" in mock_sky.Task.call_args[1]["run"]
+
+    @pytest.mark.asyncio
+    async def test_retry_workload_relaunch_keeps_writing_job_log(self):
+        """A real retry_workload relaunch replays the stashed kwargs. It must
+        still tee into the same job.log, with the next attempt's marker, and
+        the failure message must still name the file afterwards."""
+        env = _make_env({"default_cloud": "slurm", "shared_workdir": "/shared"})
+        mock_sky = _mock_sky()
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch.object(env, "_teardown", AsyncMock()),
+        ):
+            env._get_launch_ready_event("rt-1")
+            await env.launch_skypilot(
+                launch_id="rt-1",
+                launcher_config={"run": "hostname", "setup": "echo prep"},
+                config={},
+                run_metadata=RUN_METADATA,
+                step={"name": "s"},
+                setup_config={"skypilot": {"build_workdir": WORKDIR}},
+            )
+            first = mock_sky.Task.call_args[1]
+            await env.retry_workload(launch_id="rt-1", retry_count=1)
+            relaunch = mock_sky.Task.call_args[1]
+
+        expected_dir = LOG_DIR.replace("launch-l-1", "launch-rt-1")
+        assert first["envs"]["GB_JOB_LOG_DIR"] == expected_dir
+        assert relaunch["envs"]["GB_JOB_LOG_DIR"] == expected_dir
+        assert "attempt 1 (run)" in first["run"]
+        assert "attempt 2 (run)" in relaunch["run"]
+        assert "attempt 2 (setup)" in relaunch["setup"]
+        assert env._job_log_dirs["rt-1"] == expected_dir
 
     @pytest.mark.asyncio
     async def test_launch_without_shared_workdir_has_no_log_dir(self):

@@ -3624,6 +3624,9 @@ class Skypilot(Environment):
                 "retry_enabled": kwargs.get("retry_enabled"),
                 "retry_transparently": kwargs.get("retry_transparently"),
                 "bindings": kwargs.get("bindings"),
+                # The step name is part of the job.log path (_job_log_dir); without
+                # it a relaunch would run unwrapped and its output miss job.log.
+                "step": kwargs.get("step"),
             }
 
             # Build sky.Resources — merge order is precedence (last wins). The
