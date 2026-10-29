@@ -363,6 +363,29 @@ async def test_read_log_tail_redacts_secrets_and_fences():
     monitor.lsf.get_launch_secret_values.assert_called_once_with("test-launch")
 
 
+@pytest.mark.asyncio
+async def test_read_log_tail_sanitizes_off_the_event_loop():
+    """Redaction runs in a worker thread, so a large tail can't stall every
+    monitor sharing the runner's event loop."""
+    import threading
+
+    monitor, _, _ = _make_monitor([_bjobs_json("RUN")])
+    monitor._read_log_tail = types.MethodType(  # type: ignore[method-assign]
+        LSFBsubMonitor._read_log_tail, monitor
+    )
+    monitor.lsf.get_launch_secret_values.return_value = []
+    monitor._run_log_tail_cmd = AsyncMock(return_value="boom")  # type: ignore[method-assign]
+    threads = []
+
+    def spy(content, secret_values=None):
+        threads.append(threading.get_ident())
+        return content
+
+    with patch("gbserver.monitoring.lsf_bsub_monitor.sanitize_log_tail", spy):
+        await monitor._read_log_tail("/tmp/job.log", 40)
+    assert threads and threading.get_ident() not in threads
+
+
 # ---------------------------------------------------------------------------
 # Case F / G -- suspended and unknown states are NOT terminal
 # ---------------------------------------------------------------------------

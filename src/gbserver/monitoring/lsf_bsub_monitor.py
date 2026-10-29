@@ -522,7 +522,9 @@ class LSFBsubMonitor(MonitorBase):
         Sits on the critical failure-emission path, so it must not hang: it prefers
         the reused SSH tunnel (like monitor(), inheriting its connect/login/command
         timeouts) and bounds the whole read with wait_for, so a wedged bluevela
-        banner/login can't block the Failed event (see the SSH banner-timeout work)."""
+        banner/login can't block the Failed event (see the SSH banner-timeout work).
+        The sanitizing (secret redaction) runs in a worker thread for the same
+        reason."""
         if not path:
             return None
         tail_cmd = f"tail -n {max_lines} {shlex.quote(path)}"
@@ -531,9 +533,12 @@ class LSFBsubMonitor(MonitorBase):
                 self._run_log_tail_cmd(tail_cmd), timeout=_FAILURE_LOG_TAIL_TIMEOUT_S
             )
             # Shared with SkyPilot: redacts secrets (incl. this launch's declared
-            # secret values), caps the size, and defuses ``` fences.
-            return sanitize_log_tail(
-                content, self.lsf.get_launch_secret_values(self.launch_id)
+            # secret values), caps the size, and defuses ``` fences. In a worker
+            # thread so a large tail can't stall the monitors sharing this loop.
+            return await asyncio.to_thread(
+                sanitize_log_tail,
+                content,
+                self.lsf.get_launch_secret_values(self.launch_id),
             )
         except Exception as e:  # best-effort; never mask the real failure
             # (TimeoutError from wait_for is an Exception on 3.11+; CancelledError

@@ -30,8 +30,8 @@ by any space member. Two complementary passes run:
 
 Strings get a third pass, since a secret can ride inside free text (a command line,
 or a workload's log tail attached to a failure event) where no key isolates it:
-``NAME=value`` / ``name: value`` assignments whose name matches
-:data:`SENSITIVE_KEY_RE`, ``Authorization``-style header values, and well-known token
+``NAME=value`` / ``name: value`` assignments whose name *ends* in a sensitive word
+(``HF_TOKEN`` yes, ``max_tokens`` no), ``Authorization``-style header values, and well-known token
 shapes (``hf_…``, ``ghp_…``, ``AKIA…``) are masked too. :func:`sanitize_log_tail`
 wraps that with the fence/size handling both the LSF and SkyPilot failure paths need.
 """
@@ -87,7 +87,12 @@ REDACTED = "<redacted>"
 # credentials are replaced. Works standalone or embedded in a larger command string.
 # Note: this does NOT catch a token-as-username with no ``:`` (``https://TOKEN@host``);
 # such secrets should be stored under a secret-*named* key so key-name masking covers them.
-URL_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s]*:[^/@\s]*@")
+# The quantifiers are possessive (``*+``, Python 3.11+): they never give characters
+# back, so a long run of ``a:a:a:`` or of scheme characters can't trigger the
+# quadratic rescans a plain ``*`` allowed.
+URL_USERINFO_RE = re.compile(
+    r"(?<![a-zA-Z0-9+.\-])([a-zA-Z][a-zA-Z0-9+.\-]*+://)[^/@\s:]*+:[^/@\s]*+@"
+)
 
 
 def scrub_url_credentials(text: str) -> str:
@@ -119,9 +124,11 @@ _TOKEN_RE = re.compile(
     | \bgh[pousr]_[A-Za-z0-9]{20,}                # GitHub classic tokens
     | \bgithub_pat_[A-Za-z0-9_]{20,}              # GitHub fine-grained PAT
     | \b(?:AKIA|ASIA)[A-Z0-9]{16}\b               # AWS access key id
-    | \bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}      # OpenAI / Anthropic style keys
+    | \bsk-(?:[a-z]++(?:-[a-z0-9]++)?-)?+         # OpenAI / Anthropic / LiteLLM:
+      (?=[A-Za-z0-9_-]*?\d)[A-Za-z0-9_-]{20,}+    #   real keys contain a digit
+    | \b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}+     # Stripe secret / restricted keys
     | \bxox[abposr]-[A-Za-z0-9-]{10,}             # Slack
-    | \beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+  # JWT
+    | (?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]++\.[A-Za-z0-9_-]++  # JWT
     """,
     re.VERBOSE,
 )
@@ -129,15 +136,41 @@ _TOKEN_RE = re.compile(
 # ``Authorization: Bearer <x>`` / ``Basic <x>`` header values.
 _AUTH_HEADER_RE = re.compile(r"\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}")
 
-# ``NAME=value`` / ``name: value`` assignments whose *name* looks secret (same key-name
-# test as :data:`SENSITIVE_KEY_RE`, allowing a prefix such as ``HF_``/``AWS_``). The
-# value runs to whitespace or a closing quote; group 1 keeps the name and separator.
+# Sensitive words that, as the *last* part of a name, mark its value as a secret. Unlike
+# the substring test in :data:`SENSITIVE_KEY_RE` (fine for dict keys), free text needs the
+# word to end the name: ``HF_TOKEN``, ``api_key`` and ``DB_PASSWORD`` match, while
+# ``max_tokens``, ``tokenizer``, ``TOKENIZERS_PARALLELISM`` and ``PWD`` do not.
+_SENSITIVE_NAME_TAIL = r"""
+      password | passwd
+    | secret | secret[_-]?access[_-]?key | client[_-]?secret
+    | token  | auth[_-]?token | access[_-]?token | refresh[_-]?token
+    | credentials? | cookie
+    | api[_-]?key | access[_-]?key | private[_-]?key | ssh[_-]?key
+    | authorization
+"""
+
+# ``NAME=value`` / ``name: value`` assignments whose name ends in a sensitive word (an
+# optional prefix such as ``HF_``/``AWS_``/``--hf-``/``github.`` is allowed). The value
+# runs to whitespace, a quote or a separator; group 1 keeps the name and separator.
+#
+# Linear time: the name prefix is bounded ({0,64}) and must end on a separator, and the
+# value quantifier is possessive, so no input makes the engine rescan quadratically (an
+# unbounded lazy prefix took ~10 s on a 20 KB run of ``a-``).
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"""
-    (\b[A-Za-z0-9_.-]*?(?:"""
-    + SENSITIVE_KEY_RE.pattern
-    + r""")[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?)   # key, separator, opening quote
-    [^\s"',;]{3,}                                  # the value
+    (                                               # group 1: name + separator
+      (?<![A-Za-z0-9_.])                            # start of a name (a leading
+                                                    #   -/-- of a CLI flag is fine)
+      (?:[A-Za-z0-9]{1,64}[_.-]){0,3}?              # optional prefix: HF_, AWS_SECRET_,
+                                                    #   hf-, github. (bounded, so linear)
+      (?:"""
+    + _SENSITIVE_NAME_TAIL
+    + r"""
+      )
+      (?![A-Za-z0-9_])                              # the word ends the name
+      ["']?\s{0,8}+[:=]\s{0,8}+["']?              # separator, optional quotes
+    )
+    (?!\[)[^\s"',;]{3,}+                            # the value (not a [list])
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -155,7 +188,7 @@ def _redact_string(text: str, secret_values: Iterable[str]) -> str:
     ``x-access-token:...@`` for a ``name: value`` pair and mangle the URL), the
     known ``secret_values`` verbatim, well-known token shapes anywhere,
     ``Authorization``-style header values, then ``NAME=value`` assignments whose
-    name matches :data:`SENSITIVE_KEY_RE`.
+    name ends in a sensitive word (``_SENSITIVE_NAME_TAIL``).
 
     :param text: the string to redact.
     :param secret_values: exact secret strings to mask; values shorter than
@@ -219,11 +252,14 @@ def sanitize_log_tail(
 ) -> Optional[str]:
     """Make a raw log tail safe to embed in an event/PR markdown code block.
 
-    Shared by the LSF and SkyPilot failure paths. Redacts secrets
-    (:func:`redact_sensitive`) on the full text first, so the cap below can't split a
-    secret and leave a fragment the matchers no longer see; then caps the byte width
-    at :data:`LOG_TAIL_MAX_BYTES` (keeping the tail end, where the traceback is, and
-    prefixing a truncation marker); then neutralizes triple-backticks so log content
+    Shared by the LSF and SkyPilot failure paths. First trims the raw text to its last
+    ``2 *`` :data:`LOG_TAIL_MAX_BYTES`, so the work below is bounded however long the
+    tail is (LSF's ``tail -n`` has no width limit). Then redacts secrets
+    (:func:`redact_sensitive`) on that window, before the final cap, so the cap can't
+    split a secret into a fragment the matchers no longer see (the window's extra
+    slack keeps any secret straddling the cap whole). Then caps the byte width at
+    :data:`LOG_TAIL_MAX_BYTES`, keeping the tail end (where the traceback is) and
+    prefixing a truncation marker; then neutralizes triple-backticks so log content
     can't close the ```` ``` ```` fence it is shown in. Display-only; nothing parses it.
 
     :param content: the raw tail, or ``None``.
@@ -232,9 +268,12 @@ def sanitize_log_tail(
     """
     if not content:
         return None
-    content = redact_sensitive(content, secret_values)
     encoded = content.encode("utf-8", errors="replace")
-    if len(encoded) > LOG_TAIL_MAX_BYTES:
+    truncated = len(encoded) > LOG_TAIL_MAX_BYTES
+    window = encoded[-2 * LOG_TAIL_MAX_BYTES :].decode("utf-8", errors="replace")
+    content = redact_sensitive(window, secret_values)
+    encoded = content.encode("utf-8", errors="replace")
+    if truncated or len(encoded) > LOG_TAIL_MAX_BYTES:
         content = _TRUNCATION_MARKER + encoded[-LOG_TAIL_MAX_BYTES:].decode(
             "utf-8", errors="replace"
         )
