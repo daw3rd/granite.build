@@ -284,6 +284,10 @@ def test_redact_string_leaves_ordinary_log_lines_alone(line):
         "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG",
         "github.token=abc123secretvalue",
         "password=hunter2hunter2",
+        # Long prefixes (review: the {0,3} bound missed four or more parts):
+        "MY_ORG_PROD_HF_TOKEN=abcdef123456",
+        "ACME_TEAM_ML_PROD_WANDB_API_KEY=abcdef123456",
+        "a.b.c.d.e.f.g.token=abcdef123456",  # eight prefix parts
     ],
 )
 def test_assignment_matches_when_the_name_ends_in_a_sensitive_word(line):
@@ -357,6 +361,18 @@ def test_secret_values_thread_through_nested_containers():
 
 
 # --- Performance: redaction must stay linear (review item 2) -------------------
+
+
+@pytest.mark.standalone
+def test_prefix_bound_still_leaves_non_secret_names_alone():
+    """Widening the prefix bound must not start matching names whose last part
+    isn't sensitive, however many parts they have."""
+    for line in (
+        "MY_ORG_PROD_MAX_TOKENS=2048",
+        "a.b.c.d.e.f.g.tokenizer=/proj/tok",
+        "A_B_C_D_E_F_G_H_I_TOKEN_COUNT=5",
+    ):
+        assert redact_sensitive(line) == line
 
 
 @pytest.mark.standalone

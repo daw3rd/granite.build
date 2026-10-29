@@ -150,7 +150,8 @@ _SENSITIVE_NAME_TAIL = r"""
 """
 
 # ``NAME=value`` / ``name: value`` assignments whose name ends in a sensitive word (an
-# optional prefix such as ``HF_``/``AWS_``/``--hf-``/``github.`` is allowed). The value
+# optional prefix of up to eight parts, such as ``HF_``/``MY_ORG_PROD_HF_``/``--hf-``/
+# ``github.``, is allowed). The value
 # runs to whitespace, a quote or a separator; group 1 keeps the name and separator.
 #
 # Linear time: the name prefix is bounded ({0,64}) and must end on a separator, and the
@@ -161,8 +162,9 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     (                                               # group 1: name + separator
       (?<![A-Za-z0-9_.])                            # start of a name (a leading
                                                     #   -/-- of a CLI flag is fine)
-      (?:[A-Za-z0-9]{1,64}[_.-]){0,3}?              # optional prefix: HF_, AWS_SECRET_,
-                                                    #   hf-, github. (bounded, so linear)
+      (?:[A-Za-z0-9]{1,64}[_.-]){0,8}?              # optional prefix, up to 8 parts:
+                                                    #   HF_, MY_ORG_PROD_HF_, hf-, github.
+                                                    #   (bounded, so linear)
       (?:"""
     + _SENSITIVE_NAME_TAIL
     + r"""
