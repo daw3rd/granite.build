@@ -364,7 +364,7 @@ granite.build:
   targets:
 
     tokenize:
-      environment_uri: space://environments/skypilot/slurm
+      environment_uri: space://environments/skypilot/slurm/local
       inputs:
         docs:
           uri: hf:///datasets/my-org/dpk-tokenization-sample
