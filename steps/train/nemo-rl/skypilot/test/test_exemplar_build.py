@@ -162,9 +162,7 @@ def test_slurm_fixture_matches_the_bluevela_environment_constraints():
         ).read_text()
     )
     target = _target(_load("slurm-sft/build.yaml"))
-    assert (
-        target["environment_uri"] == "space://environments/skypilot/slurm/bluevela"
-    )
+    assert target["environment_uri"] == "space://environments/skypilot/slurm/bluevela"
     constraint = env["config"]["sbatch_options"]["constraint"]
     parsed = _sky_accelerators(_accelerators("slurm-sft/build.yaml"))
     assert parsed, "slurm-sft must request GPUs with accelerators"
